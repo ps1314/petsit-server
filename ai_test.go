@@ -337,6 +337,14 @@ func TestMaskIntake(t *testing.T) {
 	}
 }
 
+func TestDraftDropsPlaceholders(t *testing.T) {
+	today := time.Date(2026, 11, 3, 0, 0, 0, 0, Shanghai)
+	d := IntakeDraft{Note: "门锁密码[密码]，电话[电话]，加v[微信号]，钥匙放地垫下", Community: "翠苑一区[门牌]"}.settle(today)
+	if d.Note != "钥匙放地垫下" || d.Community != "翠苑一区" {
+		t.Fatalf("note %q community %q", d.Note, d.Community)
+	}
+}
+
 func TestIntakeRules(t *testing.T) {
 	today := time.Date(2026, 11, 3, 0, 0, 0, 0, Shanghai)
 	cases := []struct {

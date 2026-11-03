@@ -244,6 +244,8 @@ func parseIntakeRules(masked string, today time.Time) IntakeDraft {
 
 var defaultTimes = map[int][]string{1: {"09:00"}, 2: {"09:00", "18:00"}, 3: {"08:00", "13:00", "19:00"}}
 
+var rePlaceholder = regexp.MustCompile(`[，,、]?\s*(门锁密码|门禁码|取件码|密码|电话|手机号?|微信号?|加v|vx|门牌号?)?\s*[:：是为]?\s*\[(电话|微信号|门牌|密码|数字)\]`)
+
 // settle makes a draft safe to put on the form whatever the model or the patterns produced.
 func (d IntakeDraft) settle(today time.Time) IntakeDraft {
 	clip := func(s string, n int) string {
@@ -252,7 +254,9 @@ func (d IntakeDraft) settle(today time.Time) IntakeDraft {
 		}
 		return strings.TrimSpace(s)
 	}
-	d.ClientName, d.Pets, d.Community, d.Note = clip(d.ClientName, 30), clip(d.Pets, 80), clip(d.Community, 40), clip(d.Note, 150)
+	// The model sees masked text and may echo its placeholders; they mean nothing to the sitter.
+	unmask := func(s string) string { return strings.Trim(rePlaceholder.ReplaceAllString(s, ""), "，,、；; ") }
+	d.ClientName, d.Pets, d.Community, d.Note = clip(unmask(d.ClientName), 30), clip(unmask(d.Pets), 80), clip(unmask(d.Community), 40), clip(unmask(d.Note), 150)
 	start, err := time.ParseInLocation("2006-01-02", d.StartDate, Shanghai)
 	if err != nil || start.Before(today.AddDate(0, 0, -1)) || start.After(today.AddDate(0, 0, 400)) {
 		d.StartDate = ""
