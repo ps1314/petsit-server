@@ -30,12 +30,22 @@ type StoredSummary struct {
 	UpdatedAt int64       `json:"updated_at"`
 }
 
-// A stay is the client's run of visits around one visit with no more than stayGap days between
-// visit days, so every-other-day feeding still reads as one stay.
+// A stay is the client's run of visits around one visit: neighbours belong together when no
+// more than stayGap days apart, or when they were booked together (within bookedTogether of each
+// other), which keeps a cat fed every third day or a weekly visit as one stay.
 const (
-	stayGap     = 2
-	stayLookout = 62 * 24 * time.Hour
+	stayGap        = 2
+	bookedTogether = 5 * 60 // seconds; one booking may take a few requests, one per clock time
+	stayLookout    = 62 * 24 * time.Hour
 )
+
+func sameStay(a, b Visit) bool {
+	gap := b.CreatedAt - a.CreatedAt
+	if gap < 0 {
+		gap = -gap
+	}
+	return dayGap(ymd(a.StartAt), ymd(b.StartAt)) <= stayGap || gap <= bookedTogether
+}
 
 type stayDay struct {
 	Date   string `json:"date"`
@@ -73,10 +83,10 @@ func (a *API) loadStay(ctx context.Context, s Sitter, v Visit) (stay, error) {
 		return stay{}, ErrNotFound
 	}
 	lo, hi := anchor, anchor
-	for lo > 0 && dayGap(ymd(all[lo-1].StartAt), ymd(all[lo].StartAt)) <= stayGap {
+	for lo > 0 && sameStay(all[lo-1], all[lo]) {
 		lo--
 	}
-	for hi < len(all)-1 && dayGap(ymd(all[hi].StartAt), ymd(all[hi+1].StartAt)) <= stayGap {
+	for hi < len(all)-1 && sameStay(all[hi], all[hi+1]) {
 		hi++
 	}
 	st := stay{visits: all[lo : hi+1]}

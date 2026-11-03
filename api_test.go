@@ -150,8 +150,12 @@ func chatServer(t *testing.T, status int, content string, seen *map[string]any) 
 		if r.URL.Path != "/chat/completions" || r.Header.Get("Authorization") != "Bearer k" {
 			t.Errorf("unexpected request %s %q", r.URL.Path, r.Header.Get("Authorization"))
 		}
+		body, _ := io.ReadAll(r.Body)
+		if passModeration(w, body) {
+			return
+		}
 		if seen != nil {
-			json.NewDecoder(r.Body).Decode(seen)
+			json.Unmarshal(body, seen)
 		}
 		if status != 200 {
 			http.Error(w, `{"error":"bad"}`, status)
@@ -226,9 +230,12 @@ type stubModel struct {
 
 func (m stubModel) Name() string { return m.name }
 func (m stubModel) Vision() bool { return true }
-func (m stubModel) Chat(ctx context.Context, _ ChatRequest) (string, error) {
+func (m stubModel) Chat(ctx context.Context, req ChatRequest) (string, error) {
 	if m.err != nil {
 		return "", m.err
+	}
+	if strings.Contains(req.Prompt, "内容安全审核员") {
+		return `{"safe":true}`, nil
 	}
 	return `{"food":"ok"}`, nil
 }

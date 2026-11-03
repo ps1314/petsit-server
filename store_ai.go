@@ -88,7 +88,9 @@ func (st *Store) FirstPhotos(ctx context.Context, visitIDs []int64) (map[int64]P
 	if len(visitIDs) == 0 {
 		return out, nil
 	}
-	rows, err := st.db.QueryContext(ctx, `SELECT visit_id, id, file_id, received_at FROM photos WHERE visit_id IN (`+placeholders(len(visitIDs))+`) ORDER BY id`, int64Args(visitIDs)...)
+	// Only reviewed items with a still image can lead a day on the summary.
+	rows, err := st.db.QueryContext(ctx, `SELECT visit_id, id, file_id, kind, thumb_file_id, review, review_reason, received_at FROM photos
+		WHERE visit_id IN (`+placeholders(len(visitIDs))+`) AND review = 'ok' AND (kind = 'image' OR thumb_file_id <> '') ORDER BY id`, int64Args(visitIDs)...)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +98,7 @@ func (st *Store) FirstPhotos(ctx context.Context, visitIDs []int64) (map[int64]P
 	for rows.Next() {
 		var vid int64
 		var p Photo
-		if err := rows.Scan(&vid, &p.ID, &p.FileID, &p.ReceivedAt); err != nil {
+		if err := rows.Scan(&vid, &p.ID, &p.FileID, &p.Kind, &p.ThumbFileID, &p.Review, &p.ReviewReason, &p.ReceivedAt); err != nil {
 			return nil, err
 		}
 		if _, ok := out[vid]; !ok {
@@ -104,6 +106,11 @@ func (st *Store) FirstPhotos(ctx context.Context, visitIDs []int64) (map[int64]P
 		}
 	}
 	return out, rows.Err()
+}
+
+func (st *Store) SetReview(ctx context.Context, photoID int64, review, reason string) error {
+	_, err := st.db.ExecContext(ctx, `UPDATE photos SET review = ?, review_reason = ? WHERE id = ?`, review, reason, photoID)
+	return err
 }
 
 func placeholders(n int) string {

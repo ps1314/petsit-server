@@ -8,7 +8,8 @@ COPY *.go ./
 RUN go build -trimpath -ldflags="-s -w" -o /petsit .
 
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates
+# ffmpeg pulls frames out of videos for the content check.
+RUN apk add --no-cache ca-certificates ffmpeg
 COPY --from=build /petsit /petsit
 EXPOSE 80
 CMD ["/petsit"]

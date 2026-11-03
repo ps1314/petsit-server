@@ -61,6 +61,8 @@ func main() {
 			FeatureIntake:  NewDailyLimit(envInt("AI_INTAKE_DAILY_LIMIT", 100)),
 		},
 		FeaturesOff: envSet("AI_FEATURES_OFF"),
+		Frames:      FFmpegFrames(),
+		ReviewLimit: NewDailyLimit(envInt("AI_REVIEW_DAILY_LIMIT", 300)),
 		Log:         log,
 	}
 	addr := os.Getenv("HOST") + ":" + env("PORT", "80") // HOST=127.0.0.1 keeps a local dev server off the network

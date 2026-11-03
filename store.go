@@ -62,6 +62,10 @@ var schemaMySQL = []string{
 		id BIGINT PRIMARY KEY AUTO_INCREMENT,
 		visit_id BIGINT NOT NULL,
 		file_id VARCHAR(512) NOT NULL,
+		kind VARCHAR(8) NOT NULL DEFAULT 'image',
+		thumb_file_id VARCHAR(512) NOT NULL DEFAULT '',
+		review VARCHAR(16) NOT NULL DEFAULT 'ok',
+		review_reason VARCHAR(128) NOT NULL DEFAULT '',
 		received_at BIGINT NOT NULL,
 		INDEX idx_photos_visit (visit_id)
 	) DEFAULT CHARSET=utf8mb4`,
@@ -87,7 +91,7 @@ var schemaSQLite = []string{
 	`CREATE TABLE IF NOT EXISTS sitters (id INTEGER PRIMARY KEY AUTOINCREMENT, openid TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL DEFAULT '', plan TEXT NOT NULL DEFAULT 'free', plan_until INTEGER NOT NULL DEFAULT 0, consent_at INTEGER NOT NULL DEFAULT 0, capacity INTEGER NOT NULL DEFAULT 8, off_days TEXT, price INTEGER NOT NULL DEFAULT 0, holiday_pct INTEGER NOT NULL DEFAULT 0, holiday_extra INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS clients (id INTEGER PRIMARY KEY AUTOINCREMENT, sitter_id INTEGER NOT NULL, name TEXT NOT NULL, pets TEXT NOT NULL DEFAULT '', community TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '', wechat TEXT NOT NULL DEFAULT '', checklist TEXT, deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS visits (id INTEGER PRIMARY KEY AUTOINCREMENT, sitter_id INTEGER NOT NULL, client_id INTEGER NOT NULL, start_at INTEGER NOT NULL, duration_min INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'planned', arrived_at INTEGER NOT NULL DEFAULT 0, left_at INTEGER NOT NULL DEFAULT 0, ticks TEXT, created_at INTEGER NOT NULL)`,
-	`CREATE TABLE IF NOT EXISTS photos (id INTEGER PRIMARY KEY AUTOINCREMENT, visit_id INTEGER NOT NULL, file_id TEXT NOT NULL, received_at INTEGER NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS photos (id INTEGER PRIMARY KEY AUTOINCREMENT, visit_id INTEGER NOT NULL, file_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'image', thumb_file_id TEXT NOT NULL DEFAULT '', review TEXT NOT NULL DEFAULT 'ok', review_reason TEXT NOT NULL DEFAULT '', received_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS reports (visit_id INTEGER PRIMARY KEY, model TEXT NOT NULL DEFAULT '', raw TEXT, fields TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS summaries (visit_id INTEGER PRIMARY KEY, sitter_id INTEGER NOT NULL, model TEXT NOT NULL DEFAULT '', data TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
 }
@@ -105,6 +109,11 @@ var addedColumns = []struct{ table, mysql, sqlite string }{
 	// holiday_pct is unused since the surcharge became a fixed amount; it stays so old rows load.
 	{"sitters", "holiday_pct INT NOT NULL DEFAULT 0", "holiday_pct INTEGER NOT NULL DEFAULT 0"},
 	{"sitters", "holiday_extra INT NOT NULL DEFAULT 0", "holiday_extra INTEGER NOT NULL DEFAULT 0"},
+	{"photos", "kind VARCHAR(8) NOT NULL DEFAULT 'image'", "kind TEXT NOT NULL DEFAULT 'image'"},
+	{"photos", "thumb_file_id VARCHAR(512) NOT NULL DEFAULT ''", "thumb_file_id TEXT NOT NULL DEFAULT ''"},
+	// Photos taken before review existed count as reviewed.
+	{"photos", "review VARCHAR(16) NOT NULL DEFAULT 'ok'", "review TEXT NOT NULL DEFAULT 'ok'"},
+	{"photos", "review_reason VARCHAR(128) NOT NULL DEFAULT ''", "review_reason TEXT NOT NULL DEFAULT ''"},
 }
 
 var ErrNotFound = errors.New("not found")
@@ -326,10 +335,12 @@ type Visit struct {
 	Checklist []string `json:"checklist"`
 	// Ticks are the checklist items the sitter marked done on this visit, in checklist order.
 	Ticks []string `json:"ticks"`
+	// CreatedAt ties together the visits booked in one go, e.g. every third day of a stay.
+	CreatedAt int64 `json:"-"`
 }
 
 const visitCols = `v.id, v.client_id, c.name, c.pets, c.community, v.start_at, v.duration_min, v.status, v.arrived_at, v.left_at,
-	CASE WHEN r.visit_id IS NULL THEN 0 ELSE 1 END, c.note, c.phone, c.wechat, COALESCE(c.checklist, ''), COALESCE(v.ticks, '')
+	CASE WHEN r.visit_id IS NULL THEN 0 ELSE 1 END, c.note, c.phone, c.wechat, COALESCE(c.checklist, ''), COALESCE(v.ticks, ''), v.created_at
 	FROM visits v JOIN clients c ON c.id = v.client_id LEFT JOIN reports r ON r.visit_id = v.id`
 
 func scanVisit(row interface{ Scan(...any) error }) (Visit, error) {
@@ -337,7 +348,7 @@ func scanVisit(row interface{ Scan(...any) error }) (Visit, error) {
 	var hasReport int
 	var checklist, ticks string
 	err := row.Scan(&v.ID, &v.ClientID, &v.ClientName, &v.Pets, &v.Community, &v.StartAt, &v.DurationMin, &v.Status, &v.ArrivedAt, &v.LeftAt, &hasReport,
-		&v.Note, &v.Phone, &v.Wechat, &checklist, &ticks)
+		&v.Note, &v.Phone, &v.Wechat, &checklist, &ticks, &v.CreatedAt)
 	v.HasReport = hasReport == 1
 	v.Checklist, v.Ticks = decodeList(checklist), decodeList(ticks)
 	return v, err
@@ -443,15 +454,43 @@ func (st *Store) SetTicks(ctx context.Context, sitterID, id int64, ticks []strin
 	return affected(res, err)
 }
 
+// Photo is one photo or video of a visit. Videos carry a cover image (ThumbFileID) that stands in
+// for them in reports and long images.
 type Photo struct {
-	ID         int64  `json:"id"`
-	FileID     string `json:"file_id"`
-	ReceivedAt int64  `json:"received_at"`
+	ID          int64  `json:"id"`
+	FileID      string `json:"file_id"`
+	Kind        string `json:"kind"` // image or video
+	ThumbFileID string `json:"thumb_file_id"`
+	// Review is the content check: ok, pending (no model could check it yet) or blocked.
+	Review       string `json:"review"`
+	ReviewReason string `json:"review_reason"`
+	ReceivedAt   int64  `json:"received_at"`
+	sitterID     int64  // for the review quota; not stored
 }
 
-func (st *Store) AddPhoto(ctx context.Context, visitID int64, fileID string) (Photo, error) {
-	p := Photo{FileID: fileID, ReceivedAt: st.now().Unix()}
-	res, err := st.db.ExecContext(ctx, `INSERT INTO photos (visit_id, file_id, received_at) VALUES (?, ?, ?)`, visitID, fileID, p.ReceivedAt)
+// Shown reports whether the item may appear in what goes to the owner.
+func (p Photo) Shown() bool { return p.Review == ReviewOK }
+
+// Still is the image that stands for the item: the photo itself or the video's cover.
+func (p Photo) Still() string {
+	if p.Kind == KindVideo {
+		return p.ThumbFileID
+	}
+	return p.FileID
+}
+
+const (
+	KindImage     = "image"
+	KindVideo     = "video"
+	ReviewOK      = "ok"
+	ReviewPending = "pending"
+	ReviewBlocked = "blocked"
+)
+
+func (st *Store) AddPhoto(ctx context.Context, visitID int64, p Photo) (Photo, error) {
+	p.ReceivedAt = st.now().Unix()
+	res, err := st.db.ExecContext(ctx, `INSERT INTO photos (visit_id, file_id, kind, thumb_file_id, review, review_reason, received_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		visitID, p.FileID, p.Kind, p.ThumbFileID, p.Review, p.ReviewReason, p.ReceivedAt)
 	if err != nil {
 		return p, err
 	}
@@ -460,7 +499,7 @@ func (st *Store) AddPhoto(ctx context.Context, visitID int64, fileID string) (Ph
 }
 
 func (st *Store) ListPhotos(ctx context.Context, visitID int64) ([]Photo, error) {
-	rows, err := st.db.QueryContext(ctx, `SELECT id, file_id, received_at FROM photos WHERE visit_id = ? ORDER BY id`, visitID)
+	rows, err := st.db.QueryContext(ctx, `SELECT id, file_id, kind, thumb_file_id, review, review_reason, received_at FROM photos WHERE visit_id = ? ORDER BY id`, visitID)
 	if err != nil {
 		return nil, err
 	}
@@ -468,7 +507,7 @@ func (st *Store) ListPhotos(ctx context.Context, visitID int64) ([]Photo, error)
 	out := []Photo{}
 	for rows.Next() {
 		var p Photo
-		if err := rows.Scan(&p.ID, &p.FileID, &p.ReceivedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.FileID, &p.Kind, &p.ThumbFileID, &p.Review, &p.ReviewReason, &p.ReceivedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

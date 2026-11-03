@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -14,7 +15,23 @@ type PhotoFetcher interface {
 	Fetch(ctx context.Context, fileIDs []string) ([][]byte, error)
 }
 
-const maxPhotoBytes = 5 << 20
+// maxMediaBytes caps one downloaded file: compressed photos are well under it, 60-second videos too.
+const maxMediaBytes = 60 << 20
+
+// maxImageBytes caps a photo: the app compresses them, and each one goes to the model whole.
+const maxImageBytes = 5 << 20
+
+var ErrTooLarge = errors.New("file too large")
+
+// readCapped reads a whole body, failing rather than silently truncating a file over the cap:
+// a cut-off video cannot be decoded and a cut-off photo is not the photo.
+func readCapped(r io.Reader) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxMediaBytes+1))
+	if err == nil && len(b) > maxMediaBytes {
+		return nil, ErrTooLarge
+	}
+	return b, err
+}
 
 // WXFetcher downloads photos the mini program put in cloud storage. Inside WeChat Cloud
 // Hosting, with the open API service enabled, api.weixin.qq.com needs no access_token.
@@ -93,5 +110,5 @@ func (f *WXFetcher) download(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download photo: HTTP %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxPhotoBytes))
+	return readCapped(resp.Body)
 }

@@ -113,7 +113,7 @@ func (f *COSFetcher) get(ctx context.Context, a cosAuth, fileID string) ([]byte,
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("%s: HTTP %d %.120s", key, resp.StatusCode, body)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxPhotoBytes))
+	return readCapped(resp.Body)
 }
 
 // cosSign builds a COS v5 Authorization header that signs only the host header.

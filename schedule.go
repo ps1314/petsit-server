@@ -22,21 +22,31 @@ type Slot struct {
 	Duration time.Duration
 }
 
-// BuildSlots expands "date at clock for N consecutive days", the common shape of a holiday booking.
-func BuildSlots(date, clock string, durationMin, days int) ([]Slot, error) {
+const maxEvery = 15
+
+// BuildSlots expands "date at clock, every N days, over a span of days": every 1 is the common
+// daily holiday booking, every 3 the cat that only needs a visit every third day. The span
+// counts from the first day to the last possible one, so 10 days every 3 gives days 1, 4, 7, 10.
+func BuildSlots(date, clock string, durationMin, days, every int) ([]Slot, error) {
 	if durationMin <= 0 || durationMin > 24*60 {
 		return nil, fmt.Errorf("时长要在 1 到 1440 分钟之间")
 	}
 	if days <= 0 || days > 60 {
-		return nil, fmt.Errorf("连续天数要在 1 到 60 之间")
+		return nil, fmt.Errorf("天数要在 1 到 60 之间")
+	}
+	if every == 0 {
+		every = 1
+	}
+	if every < 1 || every > maxEvery {
+		return nil, fmt.Errorf("间隔要在 1 到 %d 天之间", maxEvery)
 	}
 	start, err := time.ParseInLocation("2006-01-02 15:04", date+" "+clock, Shanghai)
 	if err != nil {
 		return nil, fmt.Errorf("日期或时间格式不对")
 	}
-	slots := make([]Slot, days)
-	for i := range slots {
-		slots[i] = Slot{Start: start.AddDate(0, 0, i), Duration: time.Duration(durationMin) * time.Minute}
+	var slots []Slot
+	for i := 0; i < days; i += every {
+		slots = append(slots, Slot{Start: start.AddDate(0, 0, i), Duration: time.Duration(durationMin) * time.Minute})
 	}
 	return slots, nil
 }

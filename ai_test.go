@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,16 @@ import (
 	"testing"
 	"time"
 )
+
+// passModeration answers the upload content check as safe, so fake model servers only need to
+// script the calls a test is about. It reports whether it answered.
+func passModeration(w http.ResponseWriter, body []byte) bool {
+	if !strings.Contains(string(body), "内容安全审核员") {
+		return false
+	}
+	w.Write([]byte(`{"choices":[{"message":{"content":"{\"safe\":true}"}}]}`))
+	return true
+}
 
 type scriptedModel struct {
 	name   string
@@ -141,7 +152,11 @@ func reportServer(t *testing.T, answers ...string) (*httptest.Server, *[]string)
 				Content json.RawMessage `json:"content"`
 			} `json:"messages"`
 		}
-		json.NewDecoder(r.Body).Decode(&body)
+		raw, _ := io.ReadAll(r.Body)
+		if passModeration(w, raw) {
+			return
+		}
+		json.Unmarshal(raw, &body)
 		var parts []map[string]any
 		var text string
 		if json.Unmarshal(body.Messages[0].Content, &parts) == nil {
@@ -272,12 +287,32 @@ func TestSummaryStaysSplitOnGaps(t *testing.T) {
 	cid := int64(c["id"].(float64))
 	// 2-08 is two days after 2-06, still the same stay; 2-20 starts another.
 	e.must(201, "o1", "POST", "/api/visits", `{"client_id":`+itoa(cid)+`,"date":"2027-02-08","time":"09:00","duration_min":40,"days":1}`)
+	// Booked later, so only the day gap decides.
+	e.api.Store.now = func() time.Time { return time.Now().Add(time.Hour) }
 	e.must(201, "o1", "POST", "/api/visits", `{"client_id":`+itoa(cid)+`,"date":"2027-02-20","time":"09:00","duration_min":40,"days":1}`)
 	if n := e.must(200, "o1", "GET", first[0]+"/summary", "")["booked"]; n != float64(3) {
 		t.Fatalf("stay visits = %v, want 3", n)
 	}
 	e.must(200, "o1", "POST", first[1]+"/cancel", "")
 	e.must(409, "o1", "GET", first[1]+"/summary", "")
+}
+
+func TestSummaryStayKeepsIntervalBookingTogether(t *testing.T) {
+	e := newEnv(t)
+	e.must(200, "o1", "PUT", "/api/me", `{"display_name":"小林","consent":true}`)
+	c := e.must(201, "o1", "POST", "/api/clients", `{"name":"王姐","pets":"猫"}`)
+	cid := itoa(int64(c["client"].(map[string]any)["id"].(float64)))
+	// Every 3 days over 10 days, and weekly: gaps longer than stayGap, booked in one go.
+	v := e.must(201, "o1", "POST", "/api/visits", `{"client_id":`+cid+`,"date":"2027-03-01","time":"09:00","duration_min":40,"days":10,"every":3}`)
+	if n := e.must(200, "o1", "GET", "/api/visits/"+itoa(int64(v["ids"].([]any)[0].(float64)))+"/summary", "")["booked"]; n != float64(4) {
+		t.Fatalf("every-3 stay has %v visits, want 4", n)
+	}
+	// A separate booking a week later with nothing in between is another stay.
+	e.api.Store.now = func() time.Time { return time.Now().Add(time.Hour) }
+	later := e.must(201, "o1", "POST", "/api/visits", `{"client_id":`+cid+`,"date":"2027-03-20","time":"09:00","duration_min":40,"days":2}`)
+	if n := e.must(200, "o1", "GET", "/api/visits/"+itoa(int64(later["ids"].([]any)[0].(float64)))+"/summary", "")["booked"]; n != float64(2) {
+		t.Fatalf("later stay has %v visits, want 2", n)
+	}
 }
 
 func TestMaskText(t *testing.T) {
@@ -365,6 +400,8 @@ func TestIntakeRules(t *testing.T) {
 		{"1月20号开始，一天两次，大概一周", "2027-01-20", 7, 2, nil, ""},
 		{"12月1号喂狗，每次1.5小时，早上9.30来", "2026-12-01", 1, 1, []string{"09:30"}, "狗"},
 		{"12月2号中午1点喂猫", "2026-12-02", 1, 1, []string{"13:00"}, "猫"},
+		{"12月1号到12月10号，猫三天喂一次就行", "2026-12-01", 10, 1, nil, "猫"},
+		{"2月5号到10号喂狗", "2027-02-05", 6, 1, nil, "狗"},
 	}
 	for _, c := range cases {
 		d := parseIntakeRules(c.text, today).settle(today)
@@ -373,6 +410,22 @@ func TestIntakeRules(t *testing.T) {
 		}
 		if c.clock != nil && strings.Join(d.Times, ",") != strings.Join(c.clock, ",") {
 			t.Errorf("%q: times %v", c.text, d.Times)
+		}
+	}
+}
+
+func TestIntakeRulesEvery(t *testing.T) {
+	today := time.Date(2026, 11, 3, 0, 0, 0, 0, Shanghai)
+	for text, want := range map[string]int{
+		"12月1号到10号，三天喂一次":   3,
+		"12月1号到10号，每3天一次":   3,
+		"12月1号到10号，每隔两天来一次": 3,
+		"12月1号到10号，隔天喂":     2,
+		"12月1号到10号，每天一次":    1,
+		"12月1号到10号，一天两次":    1,
+	} {
+		if d := parseIntakeRules(text, today).settle(today); d.Every != want {
+			t.Errorf("%q: every %d, want %d", text, d.Every, want)
 		}
 	}
 }

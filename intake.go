@@ -22,6 +22,7 @@ type IntakeDraft struct {
 	Wechat      string   `json:"wechat"`
 	StartDate   string   `json:"start_date"`
 	Days        int      `json:"days"`
+	Every       int      `json:"every"` // a visit every N days; 1 is daily
 	TimesPerDay int      `json:"times_per_day"`
 	Times       []string `json:"times"`
 	DurationMin int      `json:"duration_min"`
@@ -51,7 +52,7 @@ func maskIntake(text string) (masked, phone, wechat string) {
 const intakePrompt = `今天是 %s（星期%s）。最近一次除夕是 %s。
 下面是宠主发给上门喂宠宠托师的微信消息，电话、微信号、门牌和密码已经打码。
 提取订单信息，只输出一个 JSON 对象：
-{"client_name":"宠主称呼，没有就空字符串","pets":"宠物，比如「两只猫：大橘、小白」，没有就空字符串","community":"小区或片区名，不含楼栋门牌，没有就空字符串","start_date":"第一次上门日期 YYYY-MM-DD，没写年份就取今天或之后最近的那天；除夕、初几按上面的除夕推算","end_date":"最后一次上门日期 YYYY-MM-DD，只上门一天就和 start_date 相同","times_per_day":每天上门几次（整数，没说就 1）,"times":["宠主指定的上门时间 HH:MM，没说就留空数组"],"duration_min":每次时长分钟（没说就 0）,"note":"其他交代，比如喂药、猫砂、钥匙怎么交接，不超过 60 字，没有就空字符串"}
+{"client_name":"宠主称呼，没有就空字符串","pets":"宠物，比如「两只猫：大橘、小白」，没有就空字符串","community":"小区或片区名，不含楼栋门牌，没有就空字符串","start_date":"第一次上门日期 YYYY-MM-DD，没写年份就取今天或之后最近的那天；除夕、初几按上面的除夕推算","end_date":"最后一次上门日期 YYYY-MM-DD，只上门一天就和 start_date 相同","every_days":隔几天上门一次（整数：每天上门是 1，隔一天是 2，三天一次是 3，没说就 1）,"times_per_day":每天上门几次（整数，没说就 1）,"times":["宠主指定的上门时间 HH:MM，没说就留空数组"],"duration_min":每次时长分钟（没说就 0）,"note":"其他交代，比如喂药、猫砂、钥匙怎么交接，不超过 60 字，没有就空字符串"}
 消息原文：
 """
 %s
@@ -79,6 +80,7 @@ type intakeAI struct {
 	Community   string   `json:"community"`
 	StartDate   string   `json:"start_date"`
 	EndDate     string   `json:"end_date"`
+	EveryDays   int      `json:"every_days"`
 	TimesPerDay int      `json:"times_per_day"`
 	Times       []string `json:"times"`
 	DurationMin int      `json:"duration_min"`
@@ -94,7 +96,7 @@ func parseIntakeAI(ctx context.Context, f *Fallback, masked string, today time.T
 			return fmt.Errorf("intake is not JSON: %.200s", raw)
 		}
 		d = IntakeDraft{ClientName: out.ClientName, Pets: out.Pets, Community: out.Community, Note: out.Note,
-			StartDate: out.StartDate, TimesPerDay: out.TimesPerDay, Times: out.Times, DurationMin: out.DurationMin}
+			StartDate: out.StartDate, Every: out.EveryDays, TimesPerDay: out.TimesPerDay, Times: out.Times, DurationMin: out.DurationMin}
 		start, err1 := time.ParseInLocation("2006-01-02", out.StartDate, Shanghai)
 		end, err2 := time.ParseInLocation("2006-01-02", out.EndDate, Shanghai)
 		if err1 == nil && err2 == nil && !end.Before(start) {
@@ -106,13 +108,18 @@ func parseIntakeAI(ctx context.Context, f *Fallback, masked string, today time.T
 }
 
 var (
-	reDate      = regexp.MustCompile(`(?:(\d{4})\s*[年./-]\s*)?(\d{1,2})\s*[月./]\s*(\d{1,2})\s*[日号]?`)
-	reLunar     = regexp.MustCompile(`除夕|大年三十|年三十|初(十|[一二三四五六七八九])`)
-	reDayCount  = regexp.MustCompile(`(\d{1,2}|[一二两三四五六七八九十]+)\s*(天|晚)`)
-	reWeek      = regexp.MustCompile(`一周|一个星期|一个礼拜`)
-	reTwice     = regexp.MustCompile(`(每天|一天|每日)\s*(两|2|二)\s*次|早晚各?一次|早晚都`)
+	reDate     = regexp.MustCompile(`(?:(\d{4})\s*[年./-]\s*)?(\d{1,2})\s*[月./]\s*(\d{1,2})\s*[日号]?`)
+	reLunar    = regexp.MustCompile(`除夕|大年三十|年三十|初(十|[一二三四五六七八九])`)
+	reDayCount = regexp.MustCompile(`(\d{1,2}|[一二两三四五六七八九十]+)\s*(天|晚)`)
+	reWeek     = regexp.MustCompile(`一周|一个星期|一个礼拜`)
+	reTwice    = regexp.MustCompile(`(每天|一天|每日)\s*(两|2|二)\s*次|早晚各?一次|早晚都`)
+	// 三天一次 / 每3天 / 每隔两天 (= every 3) / 隔天 (= every 2).
+	reEvery     = regexp.MustCompile(`(每隔|隔)\s*([一二两三四五六七八九十\d]+)\s*天|每\s*([一二两三四五六七八九十\d]+)\s*天\s*(?:来|喂|上门)?\s*一次|([一二两三四五六七八九十\d]+)\s*天\s*(?:来|喂|上门)?\s*一次|隔天`)
 	reThrice    = regexp.MustCompile(`(每天|一天|每日)\s*(三|3)\s*次`)
 	reDotClock  = regexp.MustCompile(`(早上|上午|中午|下午|晚上)(\s*\d{1,2})\.(\d{2})`)
+	// 2月5号到10号: the end day without its month.
+	reDayOnly   = regexp.MustCompile(`^\s*(?:到|至|-|~|～)\s*(\d{1,2})\s*[日号]`)
+	reOnceNext  = regexp.MustCompile(`^\s*(来|喂|上门)?\s*一次`)
 	reTimesNext = regexp.MustCompile(`^\s*[一二两三四五六七八九十\d]+\s*次`)
 	reUnitNext  = regexp.MustCompile(`^\s*(个?小时|分钟|斤|公斤|克|勺|元|块|点)`)
 	reClock     = regexp.MustCompile(`(早上|上午|中午|下午|晚上)?\s*(\d{1,2})\s*(?:[:：](\d{2})|点\s*(半)?)`)
@@ -169,6 +176,11 @@ func parseIntakeRules(masked string, today time.Time) IntakeDraft {
 			t = t.AddDate(1, 0, 0)
 		}
 		hits = append(hits, hit{m[0], t})
+		if e := reDayOnly.FindStringSubmatch(masked[m[1]:]); e != nil {
+			if end, _ := strconv.Atoi(e[1]); end > day && end <= 31 {
+				hits = append(hits, hit{m[1], t.AddDate(0, 0, end-day)})
+			}
+		}
 	}
 	if eve := nextEve(today); eve != "" {
 		e, _ := time.ParseInLocation("2006-01-02", eve, Shanghai)
@@ -198,8 +210,10 @@ func parseIntakeRules(masked string, today time.Time) IntakeDraft {
 	}
 	if d.Days == 0 {
 		for _, m := range reDayCount.FindAllStringSubmatchIndex(masked, -1) {
-			// 一天两次 / 每天 is a rate, not a length of stay.
-			if reTimesNext.MatchString(masked[m[1]:]) || strings.HasSuffix(masked[:m[0]], "每") {
+			// 一天两次, 每天, 三天一次, 隔两天 are rates, not the length of the stay.
+			before := masked[:m[0]]
+			if reTimesNext.MatchString(masked[m[1]:]) || reOnceNext.MatchString(masked[m[1]:]) ||
+				strings.HasSuffix(before, "每") || strings.HasSuffix(before, "隔") {
 				continue
 			}
 			d.Days = cnNumber(masked[m[2]:m[3]])
@@ -207,6 +221,18 @@ func parseIntakeRules(masked string, today time.Time) IntakeDraft {
 		}
 		if d.Days == 0 && reWeek.MatchString(masked) {
 			d.Days = 7
+		}
+	}
+	if m := reEvery.FindStringSubmatch(masked); m != nil {
+		switch {
+		case m[2] != "":
+			d.Every = cnNumber(m[2]) + 1
+		case m[3] != "":
+			d.Every = cnNumber(m[3])
+		case m[4] != "":
+			d.Every = cnNumber(m[4])
+		default:
+			d.Every = 2
 		}
 	}
 	if reThrice.MatchString(masked) {
@@ -263,6 +289,9 @@ func (d IntakeDraft) settle(today time.Time) IntakeDraft {
 	}
 	if d.Days < 1 || d.Days > 60 {
 		d.Days = 1
+	}
+	if d.Every < 1 || d.Every > maxEvery {
+		d.Every = 1
 	}
 	if d.TimesPerDay < 1 || d.TimesPerDay > 3 {
 		d.TimesPerDay = 1
@@ -359,7 +388,7 @@ func (a *API) intake(w http.ResponseWriter, r *http.Request, s Sitter) {
 // PUT /api/me/pricing {"price": 60, "holiday_extra": 30}: yuan per visit, yuan added per holiday visit.
 func (a *API) putPricing(w http.ResponseWriter, r *http.Request, s Sitter) {
 	var in struct {
-		Price      int `json:"price"`
+		Price        int `json:"price"`
 		HolidayExtra int `json:"holiday_extra"`
 	}
 	if !readJSON(w, r, &in) {

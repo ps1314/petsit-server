@@ -1,12 +1,13 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestBuildSlotsConsecutiveDays(t *testing.T) {
-	slots, err := BuildSlots("2027-02-05", "09:30", 40, 3)
+	slots, err := BuildSlots("2027-02-05", "09:30", 40, 3, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +29,7 @@ func TestBuildSlotsRejectsBadInput(t *testing.T) {
 		{"2027-02-05", "9点半", 40, 1},
 		{"2027/02/05", "09:30", 40, 1},
 	} {
-		if _, err := BuildSlots(c.date, c.clock, c.dur, c.days); err == nil {
+		if _, err := BuildSlots(c.date, c.clock, c.dur, c.days, 1); err == nil {
 			t.Errorf("%+v: expected error", c)
 		}
 	}
@@ -50,7 +51,7 @@ func TestFindConflictsUsesTravelBuffer(t *testing.T) {
 		{"07:50", false}, // 08:30 + 30 = 09:00
 	}
 	for _, c := range cases {
-		slots, _ := BuildSlots("2027-02-05", c.clock, 40, 1)
+		slots, _ := BuildSlots("2027-02-05", c.clock, 40, 1, 1)
 		got := FindConflicts(slots, existing, 30*time.Minute)
 		if (len(got) > 0) != c.clash {
 			t.Errorf("%s: clash=%v, want %v", c.clock, len(got) > 0, c.clash)
@@ -58,5 +59,22 @@ func TestFindConflictsUsesTravelBuffer(t *testing.T) {
 		if c.clash && got[0].ClientName != "王姐" {
 			t.Errorf("%s: conflict names %q", c.clock, got[0].ClientName)
 		}
+	}
+}
+
+func TestBuildSlotsEveryFewDays(t *testing.T) {
+	slots, err := BuildSlots("2027-02-05", "09:00", 30, 10, 3)
+	if err != nil || len(slots) != 4 {
+		t.Fatalf("slots %v err %v", slots, err)
+	}
+	var got []string
+	for _, s := range slots {
+		got = append(got, s.Start.Format("01-02"))
+	}
+	if strings.Join(got, ",") != "02-05,02-08,02-11,02-14" {
+		t.Fatalf("days = %v", got)
+	}
+	if _, err := BuildSlots("2027-02-05", "09:00", 30, 10, 16); err == nil {
+		t.Fatal("interval 16 accepted")
 	}
 }

@@ -26,6 +26,9 @@ type API struct {
 	// FeaturesOff switches AI features to their non-AI path (AI_FEATURES_OFF), e.g. while a model misbehaves.
 	FeaturesOff map[string]bool
 	Clock       func() time.Time // tests pin "today"; nil means time.Now
+	Frames      FrameGrabber     // pulls frames out of videos for review; nil leaves videos pending
+	// ReviewLimit caps content checks per sitter per day; past it uploads wait as pending.
+	ReviewLimit *DailyLimit
 }
 
 func (a *API) now() time.Time {
@@ -52,6 +55,7 @@ func (a *API) allow(feature string, sitterID int64) bool {
 const (
 	maxReportPhotos = 6
 	maxVisitPhotos  = 12
+	maxVisitVideos  = 3
 	// Caps per sitter that no real sitter reaches but that stop one account from filling the database.
 	maxClients = 500
 	maxVisits  = 5000
@@ -301,6 +305,7 @@ func (a *API) createVisits(w http.ResponseWriter, r *http.Request, s Sitter) {
 		Time        string `json:"time"`
 		DurationMin int    `json:"duration_min"`
 		Days        int    `json:"days"`
+		Every       int    `json:"every"` // visit every N days within Days; 0 or 1 is daily
 		Force       bool   `json:"force"`
 	}
 	if !readJSON(w, r, &in) {
@@ -310,7 +315,7 @@ func (a *API) createVisits(w http.ResponseWriter, r *http.Request, s Sitter) {
 		a.fail(w, err)
 		return
 	}
-	slots, err := BuildSlots(in.Date, in.Time, in.DurationMin, in.Days)
+	slots, err := BuildSlots(in.Date, in.Time, in.DurationMin, in.Days, in.Every)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -417,7 +422,7 @@ func (a *API) visitAction(w http.ResponseWriter, r *http.Request, s Sitter) {
 			return
 		}
 	case "photos":
-		a.addPhoto(w, r, v)
+		a.addPhoto(w, r, s, v)
 		return
 	case "report":
 		if !a.generateReport(w, r, s, v) {
@@ -435,19 +440,31 @@ func (a *API) visitAction(w http.ResponseWriter, r *http.Request, s Sitter) {
 	a.writeVisit(w, r, s, v)
 }
 
-func (a *API) addPhoto(w http.ResponseWriter, r *http.Request, v Visit) {
+// ownFile accepts only files under this visit's own folder. The backend reads them with server
+// privileges, bypassing storage permissions: a sitter must not be able to attach (and have the
+// AI describe) a file another sitter uploaded.
+func ownFile(fileID string, visitID int64) bool {
+	return strings.HasPrefix(fileID, "cloud://") && len(fileID) <= 500 &&
+		strings.Contains(fileID, "/visits/"+strconv.FormatInt(visitID, 10)+"/") && !strings.Contains(fileID, "..")
+}
+
+// POST /api/visits/{id}/photos {"file_id", "kind": "image"|"video", "thumb_file_id"}: the item is
+// content-checked before it is kept; a blocked one is refused and the app deletes the file.
+func (a *API) addPhoto(w http.ResponseWriter, r *http.Request, s Sitter, v Visit) {
 	var in struct {
-		FileID string `json:"file_id"`
+		FileID      string `json:"file_id"`
+		Kind        string `json:"kind"`
+		ThumbFileID string `json:"thumb_file_id"`
 	}
 	if !readJSON(w, r, &in) {
 		return
 	}
-	// The backend later reads this file with server privileges, bypassing storage permissions,
-	// so only accept files under this visit's own folder: a sitter must not be able to attach
-	// (and have the AI describe) a photo another sitter uploaded.
-	if !strings.HasPrefix(in.FileID, "cloud://") || len(in.FileID) > 500 ||
-		!strings.Contains(in.FileID, "/visits/"+strconv.FormatInt(v.ID, 10)+"/") || strings.Contains(in.FileID, "..") {
-		writeErr(w, http.StatusBadRequest, "照片上传失败，请重拍")
+	if in.Kind == "" {
+		in.Kind = KindImage
+	}
+	if in.Kind != KindImage && in.Kind != KindVideo || !ownFile(in.FileID, v.ID) ||
+		in.ThumbFileID != "" && (in.Kind != KindVideo || !ownFile(in.ThumbFileID, v.ID)) {
+		writeErr(w, http.StatusBadRequest, "上传失败，请重拍")
 		return
 	}
 	if v.Status != "arrived" && v.Status != "done" {
@@ -460,10 +477,31 @@ func (a *API) addPhoto(w http.ResponseWriter, r *http.Request, v Visit) {
 		return
 	}
 	if len(existing) >= maxVisitPhotos {
-		writeErr(w, http.StatusBadRequest, fmt.Sprintf("每单最多 %d 张照片", maxVisitPhotos))
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("每单最多 %d 张照片和视频", maxVisitPhotos))
 		return
 	}
-	p, err := a.Store.AddPhoto(r.Context(), v.ID, in.FileID)
+	if in.Kind == KindVideo {
+		n := 0
+		for _, p := range existing {
+			if p.Kind == KindVideo {
+				n++
+			}
+		}
+		if n >= maxVisitVideos {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("每单最多 %d 段视频", maxVisitVideos))
+			return
+		}
+	}
+	p := Photo{FileID: in.FileID, Kind: in.Kind, ThumbFileID: in.ThumbFileID, sitterID: s.ID}
+	ctx, cancel := context.WithTimeout(r.Context(), reviewTimeout)
+	p.Review, p.ReviewReason = a.review(ctx, p)
+	cancel()
+	if p.Review == ReviewBlocked {
+		a.Log.Warn("content blocked", "visit", v.ID, "file", p.FileID, "reason", p.ReviewReason)
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "没通过审核（" + p.ReviewReason + "），已删除", "blocked": true})
+		return
+	}
+	p, err = a.Store.AddPhoto(r.Context(), v.ID, p)
 	if err != nil {
 		a.fail(w, err)
 		return
@@ -497,12 +535,30 @@ func (a *API) generateReport(w http.ResponseWriter, r *http.Request, s Sitter, v
 		writeErr(w, http.StatusBadRequest, "先拍几张照片再生成报告")
 		return false
 	}
-	if len(photos) > maxReportPhotos {
-		photos = photos[len(photos)-maxReportPhotos:]
-	}
 	if !a.Model.HasVision() {
 		writeErr(w, http.StatusServiceUnavailable, ErrNoModel.Error())
 		return false
+	}
+	// Late reviews get their own time budget, so a slow one does not eat the report's.
+	rctx, rcancel := context.WithTimeout(r.Context(), reviewTimeout)
+	for i := range photos {
+		photos[i].sitterID = s.ID
+	}
+	photos = a.reviewPending(rctx, photos)
+	rcancel()
+	// Only reviewed items go to the model and into the report; videos count by their cover.
+	var ids []string
+	for _, p := range photos {
+		if p.Shown() && p.Still() != "" {
+			ids = append(ids, p.Still())
+		}
+	}
+	if len(ids) == 0 {
+		writeErr(w, http.StatusBadRequest, "照片还没审核通过，稍后再试，或者先手动填写报告")
+		return false
+	}
+	if len(ids) > maxReportPhotos {
+		ids = ids[len(ids)-maxReportPhotos:]
 	}
 	if a.AILimit != nil && !a.AILimit.Allow(s.ID) {
 		writeErr(w, http.StatusTooManyRequests, "今天 AI 生成次数用完了，可以先手动填写报告")
@@ -510,10 +566,6 @@ func (a *API) generateReport(w http.ResponseWriter, r *http.Request, s Sitter, v
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 55*time.Second)
 	defer cancel()
-	ids := make([]string, len(photos))
-	for i, p := range photos {
-		ids[i] = p.FileID
-	}
 	images, err := a.Photos.Fetch(ctx, ids)
 	if err != nil {
 		a.Log.Error("fetch photos", "visit", v.ID, "files", ids, "err", err)
