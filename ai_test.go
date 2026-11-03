@@ -222,6 +222,9 @@ func TestSummaryWithAIAndFallback(t *testing.T) {
 	e.must(200, "o1", "POST", visits[2]+"/report", "")
 
 	out := e.must(200, "o1", "POST", visits[1]+"/summary", "")
+	if out["visits"] != float64(2) || out["booked"] != float64(3) {
+		t.Fatalf("visited %v of %v, want 2 of 3: the third visit has not happened", out["visits"], out["booked"])
+	}
 	sum := out["summary"].(map[string]any)
 	text := sum["text"].(map[string]any)
 	days := text["days"].([]any)
@@ -270,7 +273,7 @@ func TestSummaryStaysSplitOnGaps(t *testing.T) {
 	// 2-08 is two days after 2-06, still the same stay; 2-20 starts another.
 	e.must(201, "o1", "POST", "/api/visits", `{"client_id":`+itoa(cid)+`,"date":"2027-02-08","time":"09:00","duration_min":40,"days":1}`)
 	e.must(201, "o1", "POST", "/api/visits", `{"client_id":`+itoa(cid)+`,"date":"2027-02-20","time":"09:00","duration_min":40,"days":1}`)
-	if n := e.must(200, "o1", "GET", first[0]+"/summary", "")["visits"]; n != float64(3) {
+	if n := e.must(200, "o1", "GET", first[0]+"/summary", "")["booked"]; n != float64(3) {
 		t.Fatalf("stay visits = %v, want 3", n)
 	}
 	e.must(200, "o1", "POST", first[1]+"/cancel", "")

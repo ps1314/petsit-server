@@ -92,6 +92,17 @@ func (a *API) loadStay(ctx context.Context, s Sitter, v Visit) (stay, error) {
 	return st, nil
 }
 
+// visited counts the visits the sitter actually made; planned ones are not 上门 yet.
+func (st stay) visited() int {
+	n := 0
+	for _, v := range st.visits {
+		if v.Status == "arrived" || v.Status == "done" {
+			n++
+		}
+	}
+	return n
+}
+
 func (st stay) ids() []int64 {
 	out := make([]int64, len(st.visits))
 	for i, v := range st.visits {
@@ -140,7 +151,7 @@ func (a *API) summaryContext(w http.ResponseWriter, r *http.Request, s Sitter) (
 func (a *API) writeSummary(w http.ResponseWriter, s Sitter, v Visit, st stay, sum *StoredSummary, degraded bool, notice string) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"summary": sum, "degraded": degraded, "notice": notice,
-		"pets": v.Pets, "days": st.days, "visits": len(st.visits),
+		"pets": v.Pets, "days": st.days, "visits": st.visited(), "booked": len(st.visits),
 		"from": st.visits[0].StartAt, "to": st.visits[len(st.visits)-1].StartAt,
 		"sitter_name": s.DisplayName, "paid": s.Paid(time.Now()),
 	})
@@ -286,7 +297,7 @@ func dayLine(d stayDay, reports map[int64]ReportFields) string {
 	}
 	for _, id := range d.ids {
 		if _, ok := reports[id]; ok {
-			return "按时上门，照片都记录在报告里"
+			return "这天的情况都记在当天的报告里"
 		}
 	}
 	return ""
@@ -307,7 +318,7 @@ func fallbackSummary(pets string, st stay, reports map[int64]ReportFields) Summa
 			alerts++
 		}
 	}
-	overall := fmt.Sprintf("这次一共上门 %d 次，每次都拍照记录了吃喝和猫砂情况。", len(st.visits))
+	overall := fmt.Sprintf("这次一共上门 %d 次，其中 %d 次有拍照报告。", st.visited(), len(reports))
 	if alerts > 0 {
 		overall += fmt.Sprintf("其中 %d 次记录了需要留意的情况，详见当天报告。", alerts)
 	} else {
@@ -344,7 +355,7 @@ func GenerateSummary(ctx context.Context, f *Fallback, pets string, st stay, rep
 				d.Date, r.Food, r.Water, r.Litter, r.Mood, r.Anomaly, r.Alert, r.Note))
 		}
 	}
-	prompt := fmt.Sprintf(summaryPrompt, maskText(pets), st.days[0].Date, st.days[len(st.days)-1].Date, len(st.visits), strings.Join(lines, "\n"))
+	prompt := fmt.Sprintf(summaryPrompt, maskText(pets), st.days[0].Date, st.days[len(st.days)-1].Date, st.visited(), strings.Join(lines, "\n"))
 	var text SummaryText
 	model, _, err := f.Do(ctx, ChatRequest{Prompt: prompt, JSON: true, Temperature: 0.5}, func(raw string) error {
 		text = SummaryText{} // a rejected reply from the previous model must not leak into this one
