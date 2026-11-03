@@ -434,9 +434,9 @@ func TestIntakeDegrades(t *testing.T) {
 func TestPricingAndStatus(t *testing.T) {
 	e := newEnv(t, &scriptedModel{name: "m"})
 	e.must(400, "o1", "PUT", "/api/me/pricing", `{"price":-1}`)
-	e.must(400, "o1", "PUT", "/api/me/pricing", `{"price":50,"holiday_pct":301}`)
-	me := e.must(200, "o1", "PUT", "/api/me/pricing", `{"price":60,"holiday_pct":50}`)["sitter"].(map[string]any)
-	if me["price"] != float64(60) || me["holiday_pct"] != float64(50) {
+	e.must(400, "o1", "PUT", "/api/me/pricing", `{"price":50,"holiday_extra":10000}`)
+	me := e.must(200, "o1", "PUT", "/api/me/pricing", `{"price":60,"holiday_extra":30}`)["sitter"].(map[string]any)
+	if me["price"] != float64(60) || me["holiday_extra"] != float64(30) {
 		t.Fatalf("sitter = %v", me)
 	}
 	st := e.must(200, "o1", "GET", "/api/ai/status", "")

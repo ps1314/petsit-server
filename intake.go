@@ -356,20 +356,20 @@ func (a *API) intake(w http.ResponseWriter, r *http.Request, s Sitter) {
 	writeJSON(w, http.StatusOK, map[string]any{"draft": d, "model": model, "degraded": model == "", "notice": notice})
 }
 
-// PUT /api/me/pricing {"price": 60, "holiday_pct": 50}
+// PUT /api/me/pricing {"price": 60, "holiday_extra": 30}: yuan per visit, yuan added per holiday visit.
 func (a *API) putPricing(w http.ResponseWriter, r *http.Request, s Sitter) {
 	var in struct {
 		Price      int `json:"price"`
-		HolidayPct int `json:"holiday_pct"`
+		HolidayExtra int `json:"holiday_extra"`
 	}
 	if !readJSON(w, r, &in) {
 		return
 	}
-	if in.Price < 0 || in.Price > 9999 || in.HolidayPct < 0 || in.HolidayPct > 300 {
-		writeErr(w, http.StatusBadRequest, "单价 0 到 9999 元，节假日加价 0 到 300%")
+	if in.Price < 0 || in.Price > 9999 || in.HolidayExtra < 0 || in.HolidayExtra > 9999 {
+		writeErr(w, http.StatusBadRequest, "单价和节假日加价都填 0 到 9999 元")
 		return
 	}
-	if err := a.Store.UpdatePricing(r.Context(), s.ID, in.Price, in.HolidayPct); err != nil {
+	if err := a.Store.UpdatePricing(r.Context(), s.ID, in.Price, in.HolidayExtra); err != nil {
 		a.fail(w, err)
 		return
 	}

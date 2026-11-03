@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-func (st *Store) UpdatePricing(ctx context.Context, id int64, price, holidayPct int) error {
-	_, err := st.db.ExecContext(ctx, `UPDATE sitters SET price = ?, holiday_pct = ? WHERE id = ?`, price, holidayPct, id)
+func (st *Store) UpdatePricing(ctx context.Context, id int64, price, holidayExtra int) error {
+	_, err := st.db.ExecContext(ctx, `UPDATE sitters SET price = ?, holiday_extra = ? WHERE id = ?`, price, holidayExtra, id)
 	return err
 }
 
