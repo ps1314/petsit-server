@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 type PhotoFetcher interface {
@@ -46,6 +47,7 @@ func (f *WXFetcher) Fetch(ctx context.Context, fileIDs []string) ([][]byte, erro
 			FileID      string `json:"fileid"`
 			DownloadURL string `json:"download_url"`
 			Status      int    `json:"status"`
+			ErrMsg      string `json:"errmsg"`
 		} `json:"file_list"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -55,15 +57,21 @@ func (f *WXFetcher) Fetch(ctx context.Context, fileIDs []string) ([][]byte, erro
 		return nil, fmt.Errorf("batchdownloadfile: %d %s", out.ErrCode, out.ErrMsg)
 	}
 	photos := make([][]byte, 0, len(out.FileList))
+	var failed []string
 	for _, item := range out.FileList {
 		if item.Status != 0 || item.DownloadURL == "" {
-			continue // expired by the 30-day lifecycle rule or deleted
+			// Deleted by the 30-day lifecycle rule, or unreadable (permissions, wrong env).
+			failed = append(failed, fmt.Sprintf("%s: status %d %s", item.FileID, item.Status, item.ErrMsg))
+			continue
 		}
 		b, err := f.download(ctx, item.DownloadURL)
 		if err != nil {
 			return nil, err
 		}
 		photos = append(photos, b)
+	}
+	if len(photos) == 0 && len(failed) > 0 {
+		return nil, fmt.Errorf("batchdownloadfile: no file readable: %s", strings.Join(failed, "; "))
 	}
 	return photos, nil
 }
