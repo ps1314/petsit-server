@@ -21,6 +21,32 @@ type API struct {
 	DevOpenID string // local development only; production identity comes from WeChat Cloud Hosting
 	Log       *slog.Logger
 	AILimit   *DailyLimit // caps report generations per sitter per day; nil means unlimited
+	// Limits caps the other AI features per sitter per day, keyed by feature; a missing entry is unlimited.
+	Limits map[string]*DailyLimit
+	// FeaturesOff switches AI features to their non-AI path (AI_FEATURES_OFF), e.g. while a model misbehaves.
+	FeaturesOff map[string]bool
+	Clock       func() time.Time // tests pin "today"; nil means time.Now
+}
+
+func (a *API) now() time.Time {
+	if a.Clock != nil {
+		return a.Clock()
+	}
+	return time.Now()
+}
+
+// AI features that can be switched off or limited on their own.
+const (
+	FeatureTrend   = "trend"   // compare a report with the pet's earlier visits
+	FeatureSummary = "summary" // end-of-stay summary
+	FeatureIntake  = "intake"  // parse an owner's message into an order
+)
+
+func (a *API) aiOn(feature string) bool { return !a.FeaturesOff[feature] }
+
+func (a *API) allow(feature string, sitterID int64) bool {
+	l := a.Limits[feature]
+	return l == nil || l.Allow(sitterID)
 }
 
 const (
@@ -50,6 +76,12 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/visits/{id}/photos/{photo}", a.auth(a.deletePhoto, true))
 	mux.HandleFunc("PUT /api/visits/{id}/report", a.auth(a.putReport, true))
 	mux.HandleFunc("PUT /api/visits/{id}/ticks", a.auth(a.putTicks, true))
+	mux.HandleFunc("GET /api/visits/{id}/summary", a.auth(a.getSummary, false))
+	mux.HandleFunc("POST /api/visits/{id}/summary", a.auth(a.makeSummary, true))
+	mux.HandleFunc("PUT /api/visits/{id}/summary", a.auth(a.putSummary, true))
+	mux.HandleFunc("POST /api/intake", a.auth(a.intake, true))
+	mux.HandleFunc("PUT /api/me/pricing", a.auth(a.putPricing, false))
+	mux.HandleFunc("GET /api/ai/status", a.auth(a.aiStatus, false))
 	return mux
 }
 
@@ -468,7 +500,7 @@ func (a *API) generateReport(w http.ResponseWriter, r *http.Request, s Sitter, v
 	if len(photos) > maxReportPhotos {
 		photos = photos[len(photos)-maxReportPhotos:]
 	}
-	if len(a.Model.Models) == 0 {
+	if !a.Model.HasVision() {
 		writeErr(w, http.StatusServiceUnavailable, ErrNoModel.Error())
 		return false
 	}
@@ -499,13 +531,21 @@ func (a *API) generateReport(w http.ResponseWriter, r *http.Request, s Sitter, v
 	}
 	// The checklist grounds the report in what the sitter did. Phone and WeChat ID never go to the model.
 	in := ReportInput{Pets: v.Pets, Photos: images, Checklist: v.Checklist, Done: v.Ticks}
+	in.NoAlert = !a.aiOn(FeatureTrend)
+	if !in.NoAlert {
+		// Comparing with earlier visits is an extra; without it the report is still useful.
+		if in.History, err = a.Store.RecentReports(r.Context(), s.ID, v.ClientID, v.StartAt, 3); err != nil {
+			a.Log.Warn("load report history", "visit", v.ID, "err", err)
+			in.History = nil
+		}
+	}
 	if v.ArrivedAt > 0 {
 		in.ArrivedAt = time.Unix(v.ArrivedAt, 0)
 	}
 	if v.LeftAt > 0 {
 		in.LeftAt = time.Unix(v.LeftAt, 0)
 	}
-	fields, raw, model, err := a.Model.Generate(ctx, in)
+	fields, raw, model, err := GenerateReport(ctx, a.Model, in)
 	if err != nil {
 		a.Log.Error("generate report", "visit", v.ID, "err", err)
 		writeErr(w, http.StatusBadGateway, "AI 暂时不可用，可以先手动填写报告")
@@ -527,7 +567,7 @@ func (a *API) putReport(w http.ResponseWriter, r *http.Request, s Sitter) {
 	if !readJSON(w, r, &f) {
 		return
 	}
-	for _, field := range []string{f.Food, f.Water, f.Litter, f.Mood, f.Anomaly, f.Note} {
+	for _, field := range []string{f.Food, f.Water, f.Litter, f.Mood, f.Anomaly, f.Note, f.Alert, f.OwnerMsg} {
 		if len([]rune(field)) > 120 {
 			writeErr(w, http.StatusBadRequest, "每项最多 120 字")
 			return

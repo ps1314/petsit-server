@@ -26,6 +26,8 @@ var schemaMySQL = []string{
 		consent_at BIGINT NOT NULL DEFAULT 0,
 		capacity INT NOT NULL DEFAULT 8,
 		off_days TEXT,
+		price INT NOT NULL DEFAULT 0,
+		holiday_pct INT NOT NULL DEFAULT 0,
 		created_at BIGINT NOT NULL
 	) DEFAULT CHARSET=utf8mb4`,
 	`CREATE TABLE IF NOT EXISTS clients (
@@ -70,14 +72,23 @@ var schemaMySQL = []string{
 		created_at BIGINT NOT NULL,
 		updated_at BIGINT NOT NULL
 	) DEFAULT CHARSET=utf8mb4`,
+	`CREATE TABLE IF NOT EXISTS summaries (
+		visit_id BIGINT PRIMARY KEY,
+		sitter_id BIGINT NOT NULL,
+		model VARCHAR(64) NOT NULL DEFAULT '',
+		data TEXT,
+		created_at BIGINT NOT NULL,
+		updated_at BIGINT NOT NULL
+	) DEFAULT CHARSET=utf8mb4`,
 }
 
 var schemaSQLite = []string{
-	`CREATE TABLE IF NOT EXISTS sitters (id INTEGER PRIMARY KEY AUTOINCREMENT, openid TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL DEFAULT '', plan TEXT NOT NULL DEFAULT 'free', plan_until INTEGER NOT NULL DEFAULT 0, consent_at INTEGER NOT NULL DEFAULT 0, capacity INTEGER NOT NULL DEFAULT 8, off_days TEXT, created_at INTEGER NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS sitters (id INTEGER PRIMARY KEY AUTOINCREMENT, openid TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL DEFAULT '', plan TEXT NOT NULL DEFAULT 'free', plan_until INTEGER NOT NULL DEFAULT 0, consent_at INTEGER NOT NULL DEFAULT 0, capacity INTEGER NOT NULL DEFAULT 8, off_days TEXT, price INTEGER NOT NULL DEFAULT 0, holiday_pct INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS clients (id INTEGER PRIMARY KEY AUTOINCREMENT, sitter_id INTEGER NOT NULL, name TEXT NOT NULL, pets TEXT NOT NULL DEFAULT '', community TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '', wechat TEXT NOT NULL DEFAULT '', checklist TEXT, deleted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS visits (id INTEGER PRIMARY KEY AUTOINCREMENT, sitter_id INTEGER NOT NULL, client_id INTEGER NOT NULL, start_at INTEGER NOT NULL, duration_min INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'planned', arrived_at INTEGER NOT NULL DEFAULT 0, left_at INTEGER NOT NULL DEFAULT 0, ticks TEXT, created_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS photos (id INTEGER PRIMARY KEY AUTOINCREMENT, visit_id INTEGER NOT NULL, file_id TEXT NOT NULL, received_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS reports (visit_id INTEGER PRIMARY KEY, model TEXT NOT NULL DEFAULT '', raw TEXT, fields TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS summaries (visit_id INTEGER PRIMARY KEY, sitter_id INTEGER NOT NULL, model TEXT NOT NULL DEFAULT '', data TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
 }
 
 // addedColumns brings a database created by an earlier version up to date. Both drivers accept
@@ -89,6 +100,8 @@ var addedColumns = []struct{ table, mysql, sqlite string }{
 	{"clients", "wechat VARCHAR(64) NOT NULL DEFAULT ''", "wechat TEXT NOT NULL DEFAULT ''"},
 	{"clients", "checklist TEXT", "checklist TEXT"},
 	{"visits", "ticks TEXT", "ticks TEXT"},
+	{"sitters", "price INT NOT NULL DEFAULT 0", "price INTEGER NOT NULL DEFAULT 0"},
+	{"sitters", "holiday_pct INT NOT NULL DEFAULT 0", "holiday_pct INTEGER NOT NULL DEFAULT 0"},
 }
 
 var ErrNotFound = errors.New("not found")
@@ -137,6 +150,10 @@ type Sitter struct {
 	// Both only feed the availability image.
 	Capacity int      `json:"capacity"`
 	OffDays  []string `json:"off_days"`
+	// Price is yuan per visit and HolidayPct the holiday surcharge; 0 leaves the quote out of the
+	// reply the intake page drafts.
+	Price      int `json:"price"`
+	HolidayPct int `json:"holiday_pct"`
 }
 
 // Paid reports drop the tool watermark until the plan expires.
@@ -147,9 +164,9 @@ func (s Sitter) Paid(now time.Time) bool {
 func (st *Store) SitterByOpenID(ctx context.Context, openid string) (Sitter, error) {
 	var s Sitter
 	var offDays string
-	q := `SELECT id, openid, display_name, plan, plan_until, consent_at, capacity, COALESCE(off_days, '') FROM sitters WHERE openid = ?`
+	q := `SELECT id, openid, display_name, plan, plan_until, consent_at, capacity, COALESCE(off_days, ''), price, holiday_pct FROM sitters WHERE openid = ?`
 	scan := func() error {
-		return st.db.QueryRowContext(ctx, q, openid).Scan(&s.ID, &s.OpenID, &s.DisplayName, &s.Plan, &s.PlanUntil, &s.ConsentAt, &s.Capacity, &offDays)
+		return st.db.QueryRowContext(ctx, q, openid).Scan(&s.ID, &s.OpenID, &s.DisplayName, &s.Plan, &s.PlanUntil, &s.ConsentAt, &s.Capacity, &offDays, &s.Price, &s.HolidayPct)
 	}
 	err := scan()
 	if errors.Is(err, sql.ErrNoRows) {
@@ -390,7 +407,7 @@ func (st *Store) DeleteVisits(ctx context.Context, sitterID int64, ids []int64) 
 			continue
 		}
 		n++
-		for _, q := range []string{`DELETE FROM photos WHERE visit_id = ?`, `DELETE FROM reports WHERE visit_id = ?`} {
+		for _, q := range []string{`DELETE FROM photos WHERE visit_id = ?`, `DELETE FROM reports WHERE visit_id = ?`, `DELETE FROM summaries WHERE visit_id = ?`} {
 			if _, err := tx.ExecContext(ctx, q, id); err != nil {
 				return 0, err
 			}

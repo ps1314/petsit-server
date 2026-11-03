@@ -32,7 +32,7 @@ type testEnv struct {
 	fetcher *fakeFetcher
 }
 
-func newEnv(t *testing.T, models ...ReportModel) *testEnv {
+func newEnv(t *testing.T, models ...LLM) *testEnv {
 	t.Helper()
 	store, err := OpenStore("sqlite", filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -225,16 +225,17 @@ type stubModel struct {
 }
 
 func (m stubModel) Name() string { return m.name }
-func (m stubModel) Generate(ctx context.Context, _ ReportInput) (ReportFields, string, error) {
+func (m stubModel) Vision() bool { return true }
+func (m stubModel) Chat(ctx context.Context, _ ChatRequest) (string, error) {
 	if m.err != nil {
-		return ReportFields{}, "", m.err
+		return "", m.err
 	}
-	return ReportFields{Food: "ok"}, "{}", nil
+	return `{"food":"ok"}`, nil
 }
 
 func TestFallbackJoinsErrors(t *testing.T) {
-	f := &Fallback{Models: []ReportModel{stubModel{"a", errors.New("a down")}, stubModel{"b", errors.New("b down")}}, PerTry: time.Second}
-	_, _, _, err := f.Generate(context.Background(), ReportInput{})
+	f := &Fallback{Models: []LLM{stubModel{"a", errors.New("a down")}, stubModel{"b", errors.New("b down")}}, PerTry: time.Second}
+	_, _, _, err := GenerateReport(context.Background(), f, ReportInput{})
 	if err == nil || !strings.Contains(err.Error(), "a down") || !strings.Contains(err.Error(), "b down") {
 		t.Fatalf("err = %v", err)
 	}

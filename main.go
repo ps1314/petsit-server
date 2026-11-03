@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 	_ "time/tzdata" // the cloud hosting base image has no zoneinfo
 )
@@ -31,16 +32,20 @@ func main() {
 		os.Exit(1)
 	}
 	travel, _ := strconv.Atoi(env("TRAVEL_MIN", "30"))
-	aiLimit, _ := strconv.Atoi(env("AI_DAILY_LIMIT", "60"))
 	httpClient := &http.Client{Timeout: 60 * time.Second}
 	api := &API{
 		Store: store,
 		Model: &Fallback{
-			Models:    modelsFromEnv(httpClient),
-			PerTry:    25 * time.Second,
-			RetryWait: 2 * time.Second,
+			Models:          modelsFromEnv(httpClient),
+			PerTry:          envDuration("AI_TIMEOUT", 25*time.Second),
+			RetryWait:       envDuration("AI_RETRY_WAIT", 2*time.Second),
+			BreakerFailures: envInt("AI_BREAKER_FAILURES", 3),
+			BreakerCooldown: envDuration("AI_BREAKER_COOLDOWN", time.Minute),
 			OnError: func(model string, err error) {
 				log.Warn("model failed, trying next", "model", model, "err", err)
+			},
+			OnTrip: func(model string) {
+				log.Error("model circuit opened", "model", model)
 			},
 		},
 		// batchdownloadfile first; reading object storage with temporary keys is the fallback.
@@ -50,11 +55,16 @@ func main() {
 		},
 		Travel:    time.Duration(travel) * time.Minute,
 		DevOpenID: os.Getenv("DEV_OPENID"),
-		AILimit:   NewDailyLimit(aiLimit),
-		Log:       log,
+		AILimit:   NewDailyLimit(envInt("AI_DAILY_LIMIT", 60)),
+		Limits: map[string]*DailyLimit{
+			FeatureSummary: NewDailyLimit(envInt("AI_SUMMARY_DAILY_LIMIT", 20)),
+			FeatureIntake:  NewDailyLimit(envInt("AI_INTAKE_DAILY_LIMIT", 100)),
+		},
+		FeaturesOff: envSet("AI_FEATURES_OFF"),
+		Log:         log,
 	}
 	addr := os.Getenv("HOST") + ":" + env("PORT", "80") // HOST=127.0.0.1 keeps a local dev server off the network
-	log.Info("listening", "addr", addr, "models", len(api.Model.Models))
+	log.Info("listening", "addr", addr, "models", api.Model.Status(), "features_off", os.Getenv("AI_FEATURES_OFF"))
 	if err := http.ListenAndServe(addr, api.Routes()); err != nil {
 		log.Error("serve", "err", err)
 		os.Exit(1)
@@ -83,24 +93,59 @@ func openStoreFromEnv() (*Store, error) {
 	return OpenStore("mysql", fmt.Sprintf("%s@tcp(%s)/%s?charset=utf8mb4&clientFoundRows=true", creds, addr, dbName))
 }
 
-// modelsFromEnv builds the fallback chain; a model without an API key is skipped, so the
-// service runs (with manual reports only) before any key is configured.
-func modelsFromEnv(httpClient *http.Client) []ReportModel {
-	var models []ReportModel
-	for _, prefix := range []string{"AI_PRIMARY", "AI_FALLBACK"} {
-		key := os.Getenv(prefix + "_API_KEY")
-		if key == "" {
+func envInt(key string, def int) int {
+	if n, err := strconv.Atoi(os.Getenv(key)); err == nil {
+		return n
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if d, err := time.ParseDuration(os.Getenv(key)); err == nil && d > 0 {
+		return d
+	}
+	return def
+}
+
+// envSet reads a comma-separated list such as AI_FEATURES_OFF=summary,intake.
+func envSet(key string) map[string]bool {
+	out := map[string]bool{}
+	for _, v := range strings.Split(os.Getenv(key), ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out[v] = true
+		}
+	}
+	return out
+}
+
+// Built-in endpoints for the two default model slots; any other slot must set its own.
+var modelDefaults = map[string][2]string{
+	"AI_PRIMARY":  {"https://api.deepseek.com", "deepseek-flash"},
+	"AI_FALLBACK": {"https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-vl-max"},
+}
+
+// modelsFromEnv builds the fallback chain from AI_MODELS (default "AI_PRIMARY,AI_FALLBACK"),
+// in that order. Each slot reads <SLOT>_API_KEY, _BASE_URL, _MODEL and _TEXT_ONLY. A slot without
+// an API key is skipped, so the service runs (with manual reports only) before any key is set.
+func modelsFromEnv(httpClient *http.Client) []LLM {
+	var models []LLM
+	for _, slot := range strings.Split(env("AI_MODELS", "AI_PRIMARY,AI_FALLBACK"), ",") {
+		slot = strings.TrimSpace(slot)
+		key := os.Getenv(slot + "_API_KEY")
+		if slot == "" || key == "" {
 			continue
 		}
-		baseURL, model := "https://api.deepseek.com", "deepseek-flash"
-		if prefix == "AI_FALLBACK" {
-			baseURL, model = "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-vl-max"
+		def := modelDefaults[slot]
+		baseURL, model := env(slot+"_BASE_URL", def[0]), env(slot+"_MODEL", def[1])
+		if baseURL == "" || model == "" {
+			continue
 		}
 		models = append(models, &OpenAICompat{
-			BaseURL: env(prefix+"_BASE_URL", baseURL),
-			Model:   env(prefix+"_MODEL", model),
-			APIKey:  key,
-			HTTP:    httpClient,
+			BaseURL:  baseURL,
+			Model:    model,
+			APIKey:   key,
+			TextOnly: os.Getenv(slot+"_TEXT_ONLY") == "true",
+			HTTP:     httpClient,
 		})
 	}
 	return models

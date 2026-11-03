@@ -98,23 +98,24 @@ type flakyModel struct {
 }
 
 func (m *flakyModel) Name() string { return "flaky" }
-func (m *flakyModel) Generate(context.Context, ReportInput) (ReportFields, string, error) {
+func (m *flakyModel) Vision() bool { return true }
+func (m *flakyModel) Chat(context.Context, ChatRequest) (string, error) {
 	m.calls++
 	if m.calls == 1 {
-		return ReportFields{}, "", m.err
+		return "", m.err
 	}
-	return ReportFields{Food: "ok"}, "{}", nil
+	return `{"food":"ok"}`, nil
 }
 
 func TestBusyModelIsRetriedOnce(t *testing.T) {
 	m := &flakyModel{err: errors.New("deepseek-flash: HTTP 503: Service is too busy")}
-	f := &Fallback{Models: []ReportModel{m}, PerTry: time.Second}
-	if _, _, _, err := f.Generate(context.Background(), ReportInput{}); err != nil || m.calls != 2 {
+	f := &Fallback{Models: []LLM{m}, PerTry: time.Second}
+	if _, _, _, err := GenerateReport(context.Background(), f, ReportInput{}); err != nil || m.calls != 2 {
 		t.Fatalf("calls %d err %v", m.calls, err)
 	}
 	other := &flakyModel{err: errors.New("HTTP 400: bad request")}
-	f = &Fallback{Models: []ReportModel{other}, PerTry: time.Second}
-	if _, _, _, err := f.Generate(context.Background(), ReportInput{}); err == nil || other.calls != 1 {
+	f = &Fallback{Models: []LLM{other}, PerTry: time.Second}
+	if _, _, _, err := GenerateReport(context.Background(), f, ReportInput{}); err == nil || other.calls != 1 {
 		t.Fatalf("non-busy error retried: calls %d", other.calls)
 	}
 }

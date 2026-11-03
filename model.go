@@ -22,6 +22,10 @@ type ReportFields struct {
 	Mood    string `json:"mood"`
 	Anomaly string `json:"anomaly"`
 	Note    string `json:"note"`
+	// Alert is a change against earlier visits worth the owner's attention; OwnerMsg is a message
+	// the sitter can send about it. Neither goes on the image unless the sitter keeps Alert.
+	Alert    string `json:"alert"`
+	OwnerMsg string `json:"owner_msg"`
 }
 
 const unseen = "照片里看不出来"
@@ -39,6 +43,14 @@ func (f ReportFields) normalized() ReportFields {
 		f.Anomaly = "无"
 	}
 	f.Note = strings.TrimSpace(f.Note)
+	f.Alert = strings.TrimSpace(f.Alert)
+	if f.Alert == "" {
+		f.Alert = "无"
+	}
+	f.OwnerMsg = strings.TrimSpace(f.OwnerMsg)
+	if f.Alert == "无" {
+		f.OwnerMsg = ""
+	}
 	return f
 }
 
@@ -50,11 +62,16 @@ type ReportInput struct {
 	// Checklist is what the owner asked for on every visit; Done is what the sitter ticked this time.
 	Checklist []string
 	Done      []string
+	// History holds this pet's earlier reports, newest first, for spotting changes.
+	History []PastReport
+	// NoAlert turns the alert off entirely (AI_FEATURES_OFF=trend).
+	NoAlert bool
 }
 
-type ReportModel interface {
-	Name() string
-	Generate(ctx context.Context, in ReportInput) (ReportFields, string, error)
+// PastReport is an earlier visit's report for the same client.
+type PastReport struct {
+	StartAt int64
+	Fields  ReportFields
 }
 
 var ErrNoModel = errors.New("AI 还没配置，可以先手动填写报告")
@@ -64,8 +81,22 @@ const reportPrompt = `你在帮上门喂宠的宠托师给宠物主人写当次�
 宠物：%s
 到达时间：%s，离开时间：%s
 %s
-只输出一个 JSON 对象，字段都是简短中文（每项不超过 40 字）：
-{"food":"进食情况，比如食盆剩余多少","water":"饮水情况","litter":"猫砂或便便情况","mood":"精神状态","anomaly":"异常情况，没有就写无","note":"给主人的一句话，语气温和，不超过 30 字"}`
+只输出一个 JSON 对象，字段都是简短中文（除 owner_msg 外每项不超过 40 字）：
+{"food":"进食情况，比如食盆剩余多少","water":"饮水情况","litter":"猫砂或便便情况","mood":"精神状态","anomaly":"异常情况，没有就写无","note":"给主人的一句话，语气温和，不超过 30 字","alert":"需要留意的变化，没有就写无","owner_msg":"alert 不是无时，宠托师可以直接发给宠主的一段话；否则写空字符串"}`
+
+// historyPrompt lets the model compare this visit with the pet's last few. It only reports
+// changes it has grounds for and never diagnoses: the sitter is not a vet and neither is the model.
+const historyPrompt = `
+同一只宠物最近几次上门的报告（从近到远）：
+%s
+把本次照片和这些记录对比，在 alert 里写需要宠主留意的变化，比如连续剩粮、饮水变少、便便异常、呕吐、精神变差、和上次相比明显不同。
+只写有依据的变化，用"观察到……"的说法，不做诊断、不说病名；没有值得留意的变化就写"无"。
+alert 不是"无"时，owner_msg 写一段宠托师可以直接发给宠主的话：不超过 80 字，平和、具体，说明观察到什么、宠托师接下来会怎么留意，要不要联系宠物医生由宠主决定。
+`
+
+const noHistoryPrompt = `
+这只宠物还没有之前的上门记录。alert 只在本次照片里有明显需要宠主知道的情况时填写（比如呕吐物、便便明显异常、食物完全没动），用"观察到……"的说法，不做诊断；否则写"无"。owner_msg 规则同上：alert 不是"无"时写一段不超过 80 字、可以直接发给宠主的话，否则写空字符串。
+`
 
 // checklistPrompt tells the model which chores the sitter confirmed. Ticked items are the
 // sitter's own word and may be stated as done; nothing else may, and what the pet ate or how it
@@ -103,48 +134,86 @@ func buildPrompt(in ReportInput) string {
 		}
 		extra = fmt.Sprintf(checklistPrompt, list(in.Done), list(left))
 	}
-	return fmt.Sprintf(reportPrompt, in.Pets, clock(in.ArrivedAt), clock(in.LeftAt), extra)
+	if in.NoAlert {
+		extra += "\nalert 一律写\"无\"，owner_msg 写空字符串。\n"
+	} else if len(in.History) > 0 {
+		var lines []string
+		for _, h := range in.History {
+			f := h.Fields.masked() // sitters type free text into reports
+			lines = append(lines, fmt.Sprintf("- %s：进食 %s；饮水 %s；猫砂/便便 %s；精神 %s；异常 %s",
+				time.Unix(h.StartAt, 0).In(Shanghai).Format("1月2日"), f.Food, f.Water, f.Litter, f.Mood, f.Anomaly))
+		}
+		extra += fmt.Sprintf(historyPrompt, strings.Join(lines, "\n"))
+	} else {
+		extra += noHistoryPrompt
+	}
+	return fmt.Sprintf(reportPrompt, maskText(in.Pets), clock(in.ArrivedAt), clock(in.LeftAt), extra)
 }
 
-// OpenAICompat talks to any chat completions endpoint that accepts image_url parts
-// (DeepSeek, DashScope compatible mode, Doubao). Swapping models is a config change.
+// ChatRequest is one prompt, optionally with photos. JSON asks the endpoint for a JSON object.
+type ChatRequest struct {
+	Prompt      string
+	Images      [][]byte
+	JSON        bool
+	Temperature float64
+}
+
+// LLM is one configured model endpoint.
+type LLM interface {
+	Name() string
+	// Vision reports whether the model accepts images; text-only models serve text-only tasks.
+	Vision() bool
+	Chat(ctx context.Context, req ChatRequest) (string, error)
+}
+
+// OpenAICompat talks to any chat completions endpoint (DeepSeek, DashScope compatible mode,
+// Doubao). Swapping models is a config change.
 type OpenAICompat struct {
-	BaseURL string
-	Model   string
-	APIKey  string
-	HTTP    *http.Client
+	BaseURL  string
+	Model    string
+	APIKey   string
+	TextOnly bool
+	HTTP     *http.Client
 }
 
 func (m *OpenAICompat) Name() string { return m.Model }
+func (m *OpenAICompat) Vision() bool { return !m.TextOnly }
 
-func (m *OpenAICompat) Generate(ctx context.Context, in ReportInput) (ReportFields, string, error) {
-	parts := []map[string]any{{"type": "text", "text": buildPrompt(in)}}
-	for _, p := range in.Photos {
-		parts = append(parts, map[string]any{
-			"type":      "image_url",
-			"image_url": map[string]string{"url": "data:" + http.DetectContentType(p) + ";base64," + base64.StdEncoding.EncodeToString(p)},
-		})
+func (m *OpenAICompat) Chat(ctx context.Context, in ChatRequest) (string, error) {
+	var content any = in.Prompt
+	if len(in.Images) > 0 {
+		parts := []map[string]any{{"type": "text", "text": in.Prompt}}
+		for _, p := range in.Images {
+			parts = append(parts, map[string]any{
+				"type":      "image_url",
+				"image_url": map[string]string{"url": "data:" + http.DetectContentType(p) + ";base64," + base64.StdEncoding.EncodeToString(p)},
+			})
+		}
+		content = parts
 	}
-	body, _ := json.Marshal(map[string]any{
-		"model":           m.Model,
-		"messages":        []map[string]any{{"role": "user", "content": parts}},
-		"response_format": map[string]string{"type": "json_object"},
-		"temperature":     0.2,
-	})
+	payload := map[string]any{
+		"model":       m.Model,
+		"messages":    []map[string]any{{"role": "user", "content": content}},
+		"temperature": in.Temperature,
+	}
+	if in.JSON {
+		payload["response_format"] = map[string]string{"type": "json_object"}
+	}
+	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(m.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return ReportFields{}, "", err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+m.APIKey)
 	resp, err := m.HTTP.Do(req)
 	if err != nil {
-		return ReportFields{}, "", err
+		return "", err
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return ReportFields{}, "", fmt.Errorf("%s: HTTP %d: %.300s", m.Model, resp.StatusCode, respBody)
+		return "", fmt.Errorf("%s: HTTP %d: %.300s", m.Model, resp.StatusCode, respBody)
 	}
 	var out struct {
 		Choices []struct {
@@ -154,72 +223,40 @@ func (m *OpenAICompat) Generate(ctx context.Context, in ReportInput) (ReportFiel
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(respBody, &out); err != nil || len(out.Choices) == 0 {
-		return ReportFields{}, "", fmt.Errorf("%s: unexpected response: %.300s", m.Model, respBody)
+		return "", fmt.Errorf("%s: unexpected response: %.300s", m.Model, respBody)
 	}
-	raw := out.Choices[0].Message.Content
-	f, err := parseReport(raw)
-	if err != nil {
-		return ReportFields{}, raw, fmt.Errorf("%s: %w", m.Model, err)
-	}
-	return f, raw, nil
+	return out.Choices[0].Message.Content, nil
 }
 
-// parseReport tolerates a ```json fence around the object, which some models add even in JSON mode.
-func parseReport(raw string) (ReportFields, error) {
+// jsonObject cuts the outermost {...} out of a reply, tolerating the ```json fence some models
+// add even in JSON mode.
+func jsonObject(raw string) string {
 	s := strings.TrimSpace(raw)
 	if i, j := strings.Index(s, "{"), strings.LastIndex(s, "}"); i >= 0 && j > i {
 		s = s[i : j+1]
 	}
+	return s
+}
+
+func parseReport(raw string) (ReportFields, error) {
 	var f ReportFields
-	if err := json.Unmarshal([]byte(s), &f); err != nil {
+	if err := json.Unmarshal([]byte(jsonObject(raw)), &f); err != nil {
 		return f, fmt.Errorf("report is not JSON: %.200s", raw)
 	}
 	return f.normalized(), nil
 }
 
-// Fallback tries each model in order, giving each its own deadline, so an outage of the
-// experimental DeepSeek vision model still yields a report within the sitter's wait.
-type Fallback struct {
-	Models    []ReportModel
-	PerTry    time.Duration
-	RetryWait time.Duration // pause before the one retry of a busy (429/503) model
-	OnError   func(model string, err error)
-}
-
-func (f *Fallback) Generate(ctx context.Context, in ReportInput) (ReportFields, string, string, error) {
-	if len(f.Models) == 0 {
-		return ReportFields{}, "", "", ErrNoModel
-	}
-	var errs []error
-	for _, m := range f.Models {
-		tctx, cancel := context.WithTimeout(ctx, f.PerTry)
-		fields, raw, err := m.Generate(tctx, in)
-		cancel()
-		// "Service is too busy" and rate limits are usually gone a moment later.
-		if err != nil && busy(err) && ctx.Err() == nil {
-			select {
-			case <-time.After(f.RetryWait):
-			case <-ctx.Done():
-			}
-			tctx, cancel = context.WithTimeout(ctx, f.PerTry)
-			fields, raw, err = m.Generate(tctx, in)
-			cancel()
+// GenerateReport writes one visit report from its photos.
+func GenerateReport(ctx context.Context, f *Fallback, in ReportInput) (ReportFields, string, string, error) {
+	var fields ReportFields
+	model, raw, err := f.Do(ctx, ChatRequest{Prompt: buildPrompt(in), Images: in.Photos, JSON: true, Temperature: 0.2}, func(raw string) error {
+		var err error
+		fields, err = parseReport(raw)
+		fields = fields.undiagnosed()
+		if in.NoAlert {
+			fields.Alert, fields.OwnerMsg = "无", ""
 		}
-		if err == nil {
-			return fields, raw, m.Name(), nil
-		}
-		if f.OnError != nil {
-			f.OnError(m.Name(), err)
-		}
-		errs = append(errs, err)
-		if ctx.Err() != nil {
-			break
-		}
-	}
-	return ReportFields{}, "", "", errors.Join(errs...)
-}
-
-func busy(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "HTTP 503") || strings.Contains(msg, "HTTP 429")
+		return err
+	})
+	return fields, raw, model, err
 }
