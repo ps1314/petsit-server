@@ -42,7 +42,11 @@ func main() {
 				log.Warn("model failed, trying next", "model", model, "err", err)
 			},
 		},
-		Photos:    &WXFetcher{Env: os.Getenv("WX_ENV"), APIBase: env("WX_API_BASE", "http://api.weixin.qq.com"), HTTP: httpClient},
+		// batchdownloadfile first; reading object storage with temporary keys is the fallback.
+		Photos: FallbackFetcher{
+			&WXFetcher{Env: os.Getenv("WX_ENV"), APIBase: env("WX_API_BASE", "http://api.weixin.qq.com"), HTTP: httpClient},
+			&COSFetcher{APIBase: env("WX_API_BASE", "http://api.weixin.qq.com"), Region: env("COS_REGION", "ap-shanghai"), HTTP: httpClient},
+		},
 		Travel:    time.Duration(travel) * time.Minute,
 		DevOpenID: os.Getenv("DEV_OPENID"),
 		AILimit:   NewDailyLimit(aiLimit),
