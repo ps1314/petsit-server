@@ -36,8 +36,9 @@ func main() {
 	api := &API{
 		Store: store,
 		Model: &Fallback{
-			Models: modelsFromEnv(httpClient),
-			PerTry: 25 * time.Second,
+			Models:    modelsFromEnv(httpClient),
+			PerTry:    25 * time.Second,
+			RetryWait: 2 * time.Second,
 			OnError: func(model string, err error) {
 				log.Warn("model failed, trying next", "model", model, "err", err)
 			},

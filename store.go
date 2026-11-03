@@ -248,7 +248,7 @@ func (st *Store) GetClient(ctx context.Context, sitterID, id int64) (Client, err
 func (st *Store) Count(ctx context.Context, table string, sitterID int64) (int, error) {
 	q := map[string]string{
 		"clients": `SELECT COUNT(*) FROM clients WHERE sitter_id = ? AND deleted = 0`,
-		"visits":  `SELECT COUNT(*) FROM visits WHERE sitter_id = ? AND status <> 'cancelled'`,
+		"visits":  `SELECT COUNT(*) FROM visits WHERE sitter_id = ? AND status NOT IN ('cancelled', 'deleted')`,
 	}[table]
 	var n int
 	err := st.db.QueryRowContext(ctx, q, sitterID).Scan(&n)
@@ -325,7 +325,7 @@ func scanVisit(row interface{ Scan(...any) error }) (Visit, error) {
 
 // ListVisits returns non-cancelled visits starting in [from, to).
 func (st *Store) ListVisits(ctx context.Context, sitterID int64, from, to time.Time) ([]Visit, error) {
-	rows, err := st.db.QueryContext(ctx, `SELECT `+visitCols+` WHERE v.sitter_id = ? AND v.start_at >= ? AND v.start_at < ? AND v.status <> 'cancelled' ORDER BY v.start_at`,
+	rows, err := st.db.QueryContext(ctx, `SELECT `+visitCols+` WHERE v.sitter_id = ? AND v.start_at >= ? AND v.start_at < ? AND v.status NOT IN ('cancelled', 'deleted') ORDER BY v.start_at`,
 		sitterID, from.Unix(), to.Unix())
 	if err != nil {
 		return nil, err
@@ -343,7 +343,7 @@ func (st *Store) ListVisits(ctx context.Context, sitterID int64, from, to time.T
 }
 
 func (st *Store) GetVisit(ctx context.Context, sitterID, id int64) (Visit, error) {
-	v, err := scanVisit(st.db.QueryRowContext(ctx, `SELECT `+visitCols+` WHERE v.id = ? AND v.sitter_id = ?`, id, sitterID))
+	v, err := scanVisit(st.db.QueryRowContext(ctx, `SELECT `+visitCols+` WHERE v.id = ? AND v.sitter_id = ? AND v.status <> 'deleted'`, id, sitterID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return v, ErrNotFound
 	}
@@ -370,6 +370,33 @@ func (st *Store) CreateVisits(ctx context.Context, sitterID, clientID int64, slo
 		ids = append(ids, id)
 	}
 	return ids, tx.Commit()
+}
+
+// DeleteVisits hides the sitter's visits among ids and drops their photo records and reports
+// (the photo files themselves expire with the 30-day storage rule). Returns how many it deleted.
+func (st *Store) DeleteVisits(ctx context.Context, sitterID int64, ids []int64) (int, error) {
+	tx, err := st.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	n := 0
+	for _, id := range ids {
+		res, err := tx.ExecContext(ctx, `UPDATE visits SET status = 'deleted' WHERE id = ? AND sitter_id = ? AND status <> 'deleted'`, id, sitterID)
+		if err != nil {
+			return 0, err
+		}
+		if k, _ := res.RowsAffected(); k == 0 {
+			continue
+		}
+		n++
+		for _, q := range []string{`DELETE FROM photos WHERE visit_id = ?`, `DELETE FROM reports WHERE visit_id = ?`} {
+			if _, err := tx.ExecContext(ctx, q, id); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return n, tx.Commit()
 }
 
 // SetVisitStatus moves a visit along planned -> arrived -> done; any non-done visit can be cancelled.

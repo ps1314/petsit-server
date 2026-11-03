@@ -180,9 +180,10 @@ func parseReport(raw string) (ReportFields, error) {
 // Fallback tries each model in order, giving each its own deadline, so an outage of the
 // experimental DeepSeek vision model still yields a report within the sitter's wait.
 type Fallback struct {
-	Models  []ReportModel
-	PerTry  time.Duration
-	OnError func(model string, err error)
+	Models    []ReportModel
+	PerTry    time.Duration
+	RetryWait time.Duration // pause before the one retry of a busy (429/503) model
+	OnError   func(model string, err error)
 }
 
 func (f *Fallback) Generate(ctx context.Context, in ReportInput) (ReportFields, string, string, error) {
@@ -194,6 +195,16 @@ func (f *Fallback) Generate(ctx context.Context, in ReportInput) (ReportFields, 
 		tctx, cancel := context.WithTimeout(ctx, f.PerTry)
 		fields, raw, err := m.Generate(tctx, in)
 		cancel()
+		// "Service is too busy" and rate limits are usually gone a moment later.
+		if err != nil && busy(err) && ctx.Err() == nil {
+			select {
+			case <-time.After(f.RetryWait):
+			case <-ctx.Done():
+			}
+			tctx, cancel = context.WithTimeout(ctx, f.PerTry)
+			fields, raw, err = m.Generate(tctx, in)
+			cancel()
+		}
 		if err == nil {
 			return fields, raw, m.Name(), nil
 		}
@@ -206,4 +217,9 @@ func (f *Fallback) Generate(ctx context.Context, in ReportInput) (ReportFields, 
 		}
 	}
 	return ReportFields{}, "", "", errors.Join(errs...)
+}
+
+func busy(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "HTTP 503") || strings.Contains(msg, "HTTP 429")
 }

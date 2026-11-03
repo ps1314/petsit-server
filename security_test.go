@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -87,5 +89,32 @@ func TestVisitCountCap(t *testing.T) {
 	}
 	if n, _ := e.api.Store.Count(t.Context(), "visits", 1); n != 0 {
 		t.Fatalf("cancelled visits counted: %d", n)
+	}
+}
+
+type flakyModel struct {
+	calls int
+	err   error
+}
+
+func (m *flakyModel) Name() string { return "flaky" }
+func (m *flakyModel) Generate(context.Context, ReportInput) (ReportFields, string, error) {
+	m.calls++
+	if m.calls == 1 {
+		return ReportFields{}, "", m.err
+	}
+	return ReportFields{Food: "ok"}, "{}", nil
+}
+
+func TestBusyModelIsRetriedOnce(t *testing.T) {
+	m := &flakyModel{err: errors.New("deepseek-flash: HTTP 503: Service is too busy")}
+	f := &Fallback{Models: []ReportModel{m}, PerTry: time.Second}
+	if _, _, _, err := f.Generate(context.Background(), ReportInput{}); err != nil || m.calls != 2 {
+		t.Fatalf("calls %d err %v", m.calls, err)
+	}
+	other := &flakyModel{err: errors.New("HTTP 400: bad request")}
+	f = &Fallback{Models: []ReportModel{other}, PerTry: time.Second}
+	if _, _, _, err := f.Generate(context.Background(), ReportInput{}); err == nil || other.calls != 1 {
+		t.Fatalf("non-busy error retried: calls %d", other.calls)
 	}
 }

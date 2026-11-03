@@ -44,6 +44,7 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/clients/{id}", a.auth(a.deleteClient, true))
 	mux.HandleFunc("GET /api/visits", a.auth(a.listVisits, false))
 	mux.HandleFunc("POST /api/visits", a.auth(a.createVisits, true))
+	mux.HandleFunc("POST /api/visits/batch-delete", a.auth(a.deleteVisits, true))
 	mux.HandleFunc("GET /api/visits/{id}", a.auth(a.getVisit, false))
 	mux.HandleFunc("POST /api/visits/{id}/{action}", a.auth(a.visitAction, true))
 	mux.HandleFunc("DELETE /api/visits/{id}/photos/{photo}", a.auth(a.deletePhoto, true))
@@ -307,6 +308,26 @@ func (a *API) createVisits(w http.ResponseWriter, r *http.Request, s Sitter) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"ids": ids})
+}
+
+// POST /api/visits/batch-delete {"ids": [1, 2]}: ids that are not the sitter's are skipped.
+func (a *API) deleteVisits(w http.ResponseWriter, r *http.Request, s Sitter) {
+	var in struct {
+		IDs []int64 `json:"ids"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if len(in.IDs) == 0 || len(in.IDs) > 200 {
+		writeErr(w, http.StatusBadRequest, "一次删除 1 到 200 单")
+		return
+	}
+	n, err := a.Store.DeleteVisits(r.Context(), s.ID, in.IDs)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": n})
 }
 
 func (a *API) loadVisit(w http.ResponseWriter, r *http.Request, s Sitter) (Visit, bool) {
