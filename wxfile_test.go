@@ -54,3 +54,14 @@ func TestFetchKeepsReadablePhotos(t *testing.T) {
 		t.Fatalf("got %d photos, err %v", len(got), err)
 	}
 }
+
+func TestFetchEmptyListIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
+	}))
+	t.Cleanup(srv.Close)
+	f := &WXFetcher{Env: "e", APIBase: srv.URL, HTTP: http.DefaultClient}
+	if _, err := f.Fetch(context.Background(), []string{"a"}); err == nil || !strings.Contains(err.Error(), "empty file_list") {
+		t.Fatalf("err = %v", err)
+	}
+}

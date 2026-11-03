@@ -463,12 +463,17 @@ func (a *API) generateReport(w http.ResponseWriter, r *http.Request, s Sitter, v
 	}
 	images, err := a.Photos.Fetch(ctx, ids)
 	if err != nil {
-		a.Log.Error("fetch photos", "visit", v.ID, "err", err)
-		writeErr(w, http.StatusBadGateway, "照片读取失败，稍后再试")
+		a.Log.Error("fetch photos", "visit", v.ID, "files", ids, "err", err)
+		// The reason is shown during the trial so storage setup problems can be fixed from a screenshot.
+		msg := err.Error()
+		if len(msg) > 160 {
+			msg = msg[:160]
+		}
+		writeErr(w, http.StatusBadGateway, "照片读取失败（"+msg+"）")
 		return false
 	}
 	if len(images) == 0 {
-		writeErr(w, http.StatusBadRequest, "照片已过期，请重新拍")
+		writeErr(w, http.StatusBadRequest, "照片都已过期（30 天自动删除），请重新拍")
 		return false
 	}
 	// The checklist grounds the report in what the sitter did. Phone and WeChat ID never go to the model.

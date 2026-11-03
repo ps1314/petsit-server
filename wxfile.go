@@ -50,11 +50,15 @@ func (f *WXFetcher) Fetch(ctx context.Context, fileIDs []string) ([][]byte, erro
 			ErrMsg      string `json:"errmsg"`
 		} `json:"file_list"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("batchdownloadfile: %w", err)
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("batchdownloadfile: HTTP %d: %.300s", resp.StatusCode, raw)
 	}
 	if out.ErrCode != 0 {
 		return nil, fmt.Errorf("batchdownloadfile: %d %s", out.ErrCode, out.ErrMsg)
+	}
+	if len(out.FileList) == 0 {
+		return nil, fmt.Errorf("batchdownloadfile: empty file_list for %d files: %.300s", len(fileIDs), raw)
 	}
 	photos := make([][]byte, 0, len(out.FileList))
 	var failed []string
