@@ -348,7 +348,7 @@ const summaryPrompt = `你在帮上门喂宠的宠托师，给宠物主人写一
 %s
 只根据这些记录写，不编造没有记录的事，不做诊断、不说病名。
 只输出一个 JSON 对象：
-{"title":"不超过 16 字的标题，带上宠物名字，比如「大橘的 7 天寄养日记」","overall":"不超过 100 字的整体小结：吃喝、精神、有没有需要留意的变化","days":[{"date":"YYYY-MM-DD","line":"这一天不超过 30 字的一句话，像宠物日记，生动但不夸张"}],"thanks":"宠托师对宠主说的一句话，不超过 40 字"}
+{"title":"不超过 16 字的标题，带上宠物名字，比如「大橘的 7 天寄养日记」","overall":"不超过 100 字的整体小结：吃喝、如厕、精神、遛狗陪玩、有没有需要留意的变化","days":[{"date":"YYYY-MM-DD","line":"这一天不超过 30 字的一句话，像宠物日记，生动但不夸张"}],"thanks":"宠托师对宠主说的一句话，不超过 40 字"}
 days 必须覆盖上面每一个日期，date 原样照抄。`
 
 // GenerateSummary drafts the stay summary from its reports. Text only: photos are not resent.
@@ -361,7 +361,7 @@ func GenerateSummary(ctx context.Context, f *Fallback, pets string, st stay, rep
 				continue
 			}
 			r = r.masked() // sitters may have typed contact details into a report
-			lines = append(lines, fmt.Sprintf("- %s：进食 %s；饮水 %s；猫砂/便便 %s；精神 %s；异常 %s；留意 %s；给主人的话 %s",
+			lines = append(lines, fmt.Sprintf("- %s：进食 %s；饮水 %s；如厕 %s；精神 %s；异常 %s；留意 %s；给主人的话 %s",
 				d.Date, r.Food, r.Water, r.Litter, r.Mood, r.Anomaly, r.Alert, r.Note))
 		}
 	}

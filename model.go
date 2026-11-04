@@ -82,7 +82,7 @@ const reportPrompt = `你在帮上门喂宠的宠托师给宠物主人写当次�
 到达时间：%s，离开时间：%s
 %s
 只输出一个 JSON 对象，字段都是简短中文（除 owner_msg 外每项不超过 40 字）：
-{"food":"进食情况，比如食盆剩余多少","water":"饮水情况","litter":"猫砂或便便情况","mood":"精神状态","anomaly":"异常情况，没有就写无","note":"给主人的一句话，语气温和，不超过 30 字","alert":"需要留意的变化，没有就写无","owner_msg":"alert 不是无时，宠托师可以直接发给宠主的一段话；否则写空字符串"}`
+{"food":"进食情况，比如食盆剩余多少","water":"饮水情况","litter":"如厕情况：猫砂盆、狗狗便便或尿垫","mood":"精神状态","anomaly":"异常情况，没有就写无","note":"给主人的一句话，语气温和，不超过 30 字","alert":"需要留意的变化，没有就写无","owner_msg":"alert 不是无时，宠托师可以直接发给宠主的一段话；否则写空字符串"}`
 
 // historyPrompt lets the model compare this visit with the pet's last few. It only reports
 // changes it has grounds for and never diagnoses: the sitter is not a vet and neither is the model.
@@ -104,7 +104,7 @@ const noHistoryPrompt = `
 const checklistPrompt = `
 宠主交代的每次上门事项，宠托师本次勾选已完成：%s
 没有勾选的事项：%s
-勾选的事项是宠托师确认做过的，可以在对应字段里写成"宠托师已……"；没勾选的不许写成做过。宠物吃了多少、喝了多少、精神怎样仍然只看照片，照片里看不出来就写"照片里看不出来"。
+勾选的事项是宠托师确认做过的，可以在对应字段里写成"宠托师已……"，遛狗、陪玩这类没有对应字段的写进 mood（比如"宠托师已遛 30 分钟，精神不错"）；没勾选的不许写成做过。宠物吃了多少、喝了多少、精神怎样仍然只看照片，照片里看不出来就写"照片里看不出来"。
 `
 
 func buildPrompt(in ReportInput) string {
@@ -140,7 +140,7 @@ func buildPrompt(in ReportInput) string {
 		var lines []string
 		for _, h := range in.History {
 			f := h.Fields.masked() // sitters type free text into reports
-			lines = append(lines, fmt.Sprintf("- %s：进食 %s；饮水 %s；猫砂/便便 %s；精神 %s；异常 %s",
+			lines = append(lines, fmt.Sprintf("- %s：进食 %s；饮水 %s；如厕 %s；精神 %s；异常 %s",
 				time.Unix(h.StartAt, 0).In(Shanghai).Format("1月2日"), f.Food, f.Water, f.Litter, f.Mood, f.Anomaly))
 		}
 		extra += fmt.Sprintf(historyPrompt, strings.Join(lines, "\n"))

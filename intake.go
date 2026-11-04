@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // IntakeDraft is an order read out of a message the pet owner sent the sitter. It is only a
@@ -52,7 +53,7 @@ func maskIntake(text string) (masked, phone, wechat string) {
 const intakePrompt = `今天是 %s（星期%s）。最近一次除夕是 %s。
 下面是宠主发给上门喂宠宠托师的微信消息，电话、微信号、门牌和密码已经打码。
 提取订单信息，只输出一个 JSON 对象：
-{"client_name":"宠主称呼，没有就空字符串","pets":"宠物，比如「两只猫：大橘、小白」，没有就空字符串","community":"小区或片区名，不含楼栋门牌，没有就空字符串","start_date":"第一次上门日期 YYYY-MM-DD，没写年份就取今天或之后最近的那天；除夕、初几按上面的除夕推算","end_date":"最后一次上门日期 YYYY-MM-DD，只上门一天就和 start_date 相同","every_days":隔几天上门一次（整数：每天上门是 1，隔一天是 2，三天一次是 3，没说就 1）,"times_per_day":每天上门几次（整数，没说就 1）,"times":["宠主指定的上门时间 HH:MM，没说就留空数组"],"duration_min":每次时长分钟（没说就 0）,"note":"其他交代，比如喂药、猫砂、钥匙怎么交接，不超过 60 字，没有就空字符串"}
+{"client_name":"宠主称呼，没有就空字符串","pets":"宠物，比如「两只猫：大橘、小白」或「一只柯基：豆豆」，没有就空字符串","community":"小区或片区名，不含楼栋门牌，没有就空字符串","start_date":"第一次上门日期 YYYY-MM-DD，没写年份就取今天或之后最近的那天；除夕、初几按上面的除夕推算","end_date":"最后一次上门日期 YYYY-MM-DD，只上门一天就和 start_date 相同","every_days":隔几天上门一次（整数：每天上门是 1，隔一天是 2，三天一次是 3，没说就 1）,"times_per_day":每天上门几次（整数，没说就 1）,"times":["宠主指定的上门时间 HH:MM，没说就留空数组"],"duration_min":每次时长分钟（没说就 0）,"note":"其他交代，比如喂药、猫砂、钥匙怎么交接，不超过 60 字，没有就空字符串"}
 消息原文：
 """
 %s
@@ -112,7 +113,8 @@ var (
 	reLunar    = regexp.MustCompile(`除夕|大年三十|年三十|初(十|[一二三四五六七八九])`)
 	reDayCount = regexp.MustCompile(`(\d{1,2}|[一二两三四五六七八九十]+)\s*(天|晚)`)
 	reWeek     = regexp.MustCompile(`一周|一个星期|一个礼拜`)
-	reTwice    = regexp.MustCompile(`(每天|一天|每日)\s*(两|2|二)\s*次|早晚各?一次|早晚都`)
+	// 每天两次 / 每天遛两次 / 早晚各一次 / 早晚各遛狗一次 / 早晚遛狗各一次 / 早晚各上门一次.
+	reTwice = regexp.MustCompile(`(每天|一天|每日)\s*(?:遛狗?|喂|来|上门)?\s*(两|2|二)\s*次|早晚\s*(?:遛狗?|喂|来|上门)?\s*各?\s*(?:遛狗?|喂|来|上门)?\s*一次|早晚都`)
 	// 三天一次 / 每3天 / 每隔两天 (= every 3) / 隔天 (= every 2).
 	reEvery    = regexp.MustCompile(`(每隔|隔)\s*([一二两三四五六七八九十\d]+)\s*天|每\s*([一二两三四五六七八九十\d]+)\s*天\s*(?:来|喂|上门)?\s*一次|([一二两三四五六七八九十\d]+)\s*天\s*(?:来|喂|上门)?\s*一次|隔天`)
 	reThrice   = regexp.MustCompile(`(每天|一天|每日)\s*(三|3)\s*次`)
@@ -123,8 +125,21 @@ var (
 	reTimesNext = regexp.MustCompile(`^\s*[一二两三四五六七八九十\d]+\s*次`)
 	reUnitNext  = regexp.MustCompile(`^\s*(个?小时|分钟|斤|公斤|克|勺|元|块|点)`)
 	reClock     = regexp.MustCompile(`(早上|上午|中午|下午|晚上)?\s*(\d{1,2})\s*(?:[:：](\d{2})|点\s*(半)?)`)
-	rePets      = regexp.MustCompile(`([一二两三四五六七八九十\d]+\s*只)?\s*(猫咪|小猫|猫|狗狗|小狗|狗|兔子|兔|仓鼠|鹦鹉|乌龟|龟)`)
+	rePets      = regexp.MustCompile(`([一二两三四五六七八九十\d]+\s*只)?\s*(` + catBreeds + `|猫咪|小猫|猫|` + dogBreeds + `|狗狗|小狗|狗|兔子|兔|仓鼠|鹦鹉|乌龟|龟)`)
 	reCommunity = regexp.MustCompile(`[\p{Han}A-Za-z0-9]{2,12}(小区|花园|公寓|家园|新村|广场|大厦|苑|府|里|城)`)
+)
+
+// Breeds the rule-based intake names as pets; miniprogram/utils/pet.js keeps the same lists.
+const (
+	catBreeds = `英短|美短|布偶|暹罗|加菲|缅因|金渐层|银渐层|折耳|狸花|橘猫`
+	dogBreeds = `柯基|泰迪|金毛|柴犬|比熊|拉布拉多|边牧|哈士奇|萨摩耶|博美|法斗|贵宾|雪纳瑞`
+)
+
+var (
+	reCatWord = regexp.MustCompile(`^(` + catBreeds + `|猫咪|小猫|猫)$`)
+	// 遛狗, 狗粮, 猫砂 and the like name a chore or a thing, not another pet.
+	choreBefore = "遛铲"
+	choreAfter  = "粮砂绳窝盆"
 )
 
 var cnDigit = map[rune]int{'一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
@@ -255,17 +270,51 @@ func parseIntakeRules(masked string, today time.Time) IntakeDraft {
 			d.Times = append(d.Times, fmt.Sprintf("%02d:%02d", h, min))
 		}
 	}
-	var pets []string
-	seen := map[string]bool{}
-	for _, m := range rePets.FindAllString(masked, -1) {
-		if m = strings.TrimSpace(m); !seen[m] {
-			seen[m] = true
-			pets = append(pets, m)
-		}
-	}
-	d.Pets = strings.Join(pets, "、")
+	d.Pets = pickPets(masked)
 	d.Community = reCommunity.FindString(masked)
 	return d
+}
+
+// pickPets lists the pets a message names. A bare 猫 or 狗 is dropped when it is part of a chore
+// or a thing (遛狗, 狗粮, 猫砂), or when the same kind of pet is already named with a count or a
+// breed ("一只柯基，每天遛狗" is one corgi, not a corgi and a dog).
+func pickPets(text string) string {
+	type hit struct {
+		text, kind string
+		bare       bool
+	}
+	var hits []hit
+	named := map[string]bool{}
+	for _, m := range rePets.FindAllStringSubmatchIndex(text, -1) {
+		animal := text[m[4]:m[5]]
+		kind := animal
+		if reCatWord.MatchString(animal) {
+			kind = "cat"
+		} else if strings.Contains(dogBreeds+"|狗狗|小狗|狗", animal) {
+			kind = "dog"
+		}
+		bare := m[2] < 0 && (animal == "猫" || animal == "狗")
+		if bare {
+			before, _ := utf8.DecodeLastRuneInString(text[:m[4]])
+			after, _ := utf8.DecodeRuneInString(text[m[5]:])
+			if strings.ContainsRune(choreBefore, before) || strings.ContainsRune(choreAfter, after) {
+				continue
+			}
+		} else {
+			named[kind] = true
+		}
+		hits = append(hits, hit{strings.TrimSpace(text[m[0]:m[1]]), kind, bare})
+	}
+	var pets []string
+	seen := map[string]bool{}
+	for _, h := range hits {
+		if h.bare && named[h.kind] || seen[h.text] {
+			continue
+		}
+		seen[h.text] = true
+		pets = append(pets, h.text)
+	}
+	return strings.Join(pets, "、")
 }
 
 var defaultTimes = map[int][]string{1: {"09:00"}, 2: {"09:00", "18:00"}, 3: {"08:00", "13:00", "19:00"}}
