@@ -85,6 +85,16 @@ var schemaMySQL = []string{
 		created_at BIGINT NOT NULL,
 		updated_at BIGINT NOT NULL
 	) DEFAULT CHARSET=utf8mb4`,
+	`CREATE TABLE IF NOT EXISTS feedback (
+		id BIGINT PRIMARY KEY AUTO_INCREMENT,
+		sitter_id BIGINT NOT NULL,
+		kind VARCHAR(16) NOT NULL,
+		content TEXT NOT NULL,
+		contact VARCHAR(64) NOT NULL DEFAULT '',
+		reply TEXT,
+		created_at BIGINT NOT NULL,
+		INDEX idx_feedback_sitter (sitter_id, created_at)
+	) DEFAULT CHARSET=utf8mb4`,
 }
 
 var schemaSQLite = []string{
@@ -94,6 +104,7 @@ var schemaSQLite = []string{
 	`CREATE TABLE IF NOT EXISTS photos (id INTEGER PRIMARY KEY AUTOINCREMENT, visit_id INTEGER NOT NULL, file_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'image', thumb_file_id TEXT NOT NULL DEFAULT '', review TEXT NOT NULL DEFAULT 'ok', review_reason TEXT NOT NULL DEFAULT '', received_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS reports (visit_id INTEGER PRIMARY KEY, model TEXT NOT NULL DEFAULT '', raw TEXT, fields TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS summaries (visit_id INTEGER PRIMARY KEY, sitter_id INTEGER NOT NULL, model TEXT NOT NULL DEFAULT '', data TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, sitter_id INTEGER NOT NULL, kind TEXT NOT NULL, content TEXT NOT NULL, contact TEXT NOT NULL DEFAULT '', reply TEXT, created_at INTEGER NOT NULL)`,
 }
 
 // addedColumns brings a database created by an earlier version up to date. Both drivers accept
@@ -164,7 +175,7 @@ type Sitter struct {
 	OffDays  []string `json:"off_days"`
 	// Price is yuan per visit and HolidayExtra the yuan added per holiday visit; a 0 price leaves the quote out of the
 	// reply the intake page drafts.
-	Price      int `json:"price"`
+	Price        int `json:"price"`
 	HolidayExtra int `json:"holiday_extra"`
 }
 

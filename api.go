@@ -72,6 +72,7 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("POST /api/clients", a.auth(a.createClient, true))
 	mux.HandleFunc("PUT /api/clients/{id}", a.auth(a.updateClient, true))
 	mux.HandleFunc("DELETE /api/clients/{id}", a.auth(a.deleteClient, true))
+	mux.HandleFunc("GET /api/clients/{id}/visits", a.auth(a.clientVisits, false))
 	mux.HandleFunc("GET /api/visits", a.auth(a.listVisits, false))
 	mux.HandleFunc("POST /api/visits", a.auth(a.createVisits, true))
 	mux.HandleFunc("POST /api/visits/batch-delete", a.auth(a.deleteVisits, true))
@@ -86,6 +87,8 @@ func (a *API) Routes() http.Handler {
 	mux.HandleFunc("POST /api/intake", a.auth(a.intake, true))
 	mux.HandleFunc("PUT /api/me/pricing", a.auth(a.putPricing, false))
 	mux.HandleFunc("GET /api/ai/status", a.auth(a.aiStatus, false))
+	mux.HandleFunc("GET /api/feedback", a.auth(a.listFeedback, false))
+	mux.HandleFunc("POST /api/feedback", a.auth(a.postFeedback, false))
 	return mux
 }
 
@@ -277,6 +280,26 @@ func (a *API) deleteClient(w http.ResponseWriter, r *http.Request, s Sitter) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+// GET /api/clients/{id}/visits
+// clientVisits lists every live visit of one client, oldest first, for the client's own page.
+func (a *API) clientVisits(w http.ResponseWriter, r *http.Request, s Sitter) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	c, err := a.Store.GetClient(r.Context(), s.ID, id)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	vs, err := a.Store.ClientVisits(r.Context(), s.ID, id, time.Unix(0, 0), time.Unix(1<<40, 0))
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"client": c, "visits": vs})
 }
 
 // GET /api/visits?date=2026-11-07&days=7

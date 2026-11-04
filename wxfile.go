@@ -1,10 +1,10 @@
 package main
 
 import (
-	"errors"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"

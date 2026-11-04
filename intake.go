@@ -114,9 +114,9 @@ var (
 	reWeek     = regexp.MustCompile(`一周|一个星期|一个礼拜`)
 	reTwice    = regexp.MustCompile(`(每天|一天|每日)\s*(两|2|二)\s*次|早晚各?一次|早晚都`)
 	// 三天一次 / 每3天 / 每隔两天 (= every 3) / 隔天 (= every 2).
-	reEvery     = regexp.MustCompile(`(每隔|隔)\s*([一二两三四五六七八九十\d]+)\s*天|每\s*([一二两三四五六七八九十\d]+)\s*天\s*(?:来|喂|上门)?\s*一次|([一二两三四五六七八九十\d]+)\s*天\s*(?:来|喂|上门)?\s*一次|隔天`)
-	reThrice    = regexp.MustCompile(`(每天|一天|每日)\s*(三|3)\s*次`)
-	reDotClock  = regexp.MustCompile(`(早上|上午|中午|下午|晚上)(\s*\d{1,2})\.(\d{2})`)
+	reEvery    = regexp.MustCompile(`(每隔|隔)\s*([一二两三四五六七八九十\d]+)\s*天|每\s*([一二两三四五六七八九十\d]+)\s*天\s*(?:来|喂|上门)?\s*一次|([一二两三四五六七八九十\d]+)\s*天\s*(?:来|喂|上门)?\s*一次|隔天`)
+	reThrice   = regexp.MustCompile(`(每天|一天|每日)\s*(三|3)\s*次`)
+	reDotClock = regexp.MustCompile(`(早上|上午|中午|下午|晚上)(\s*\d{1,2})\.(\d{2})`)
 	// 2月5号到10号: the end day without its month.
 	reDayOnly   = regexp.MustCompile(`^\s*(?:到|至|-|~|～)\s*(\d{1,2})\s*[日号]`)
 	reOnceNext  = regexp.MustCompile(`^\s*(来|喂|上门)?\s*一次`)
